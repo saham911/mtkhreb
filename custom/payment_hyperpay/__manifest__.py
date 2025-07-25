@@ -1,11 +1,11 @@
 {
     'name': 'HyperPay Payment Gateway',
-    'version': '1.1',
+    'version': '1.2',
     'category': 'Accounting/Payment',
     'summary': 'HyperPay Payment Integration',
     'description': 'Integration of HyperPay payment gateway for Odoo v18',
     'author': 'Your Name',
-    'depends': ['payment', 'website_sale'],  # أضف website_sale إذا كنت تستخدمه
+    'depends': ['payment', 'website_sale'],
     'data': [
         'views/payment_views.xml',
         'views/hyperpay_templates.xml',
@@ -16,7 +16,7 @@
         ],
     },
     'installable': True,
-    'application': False,  # غيرها إلى False لتجنب مشاكل التحميل
+    'application': False, 
     'auto_install': False,
     'license': 'LGPL-3',
 }
