@@ -7,7 +7,7 @@
 #############################################################################
 {
     'name': "Hyperpay Payment Gateway",
-    'version': '18.0.1.0',
+    'version': '18.0.0.0',
     'category': 'Accounting/Payment Providers',
     'sequence': 51,
     'summary': 'Hyperpay Payment Gateway to intergrate Mada Card, Visa Card and Master Card payments. It supports Credit cards, Debit Cards and MADA Card payments in KSA, Saudi Arabia',
