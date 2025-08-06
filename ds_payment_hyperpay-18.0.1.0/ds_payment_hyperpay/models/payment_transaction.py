@@ -45,7 +45,6 @@ class PaymentTransaction(models.Model):
             entity_id = hyperpay_provider.hyperpay_merchant_id_mada
         else:
             entity_id = hyperpay_provider.hyperpay_merchant_id
-
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
@@ -56,29 +55,6 @@ class PaymentTransaction(models.Model):
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
         }
-
-        if hyperpay_provider.state != 'enabled':
-            request_values.update({
-                'testMode': 'EXTERNAL',
-                'customParameters[3DS2_enrolled]': 'true'
-            })
-
-        partner = self.partner_id
-        state = ''
-        if partner.state_id:
-            state = partner.state_id.code or partner.state_id.name or ''
-
-        request_values.update({
-            'customer.email': partner.email or 'test@example.com',
-            'billing.street1': partner.street or 'Unknown Street',
-            'billing.city': partner.city or 'Unknown City',
-            'billing.state': state,
-            'billing.country': partner.country_id.code if partner.country_id else 'SA',
-            'billing.postcode': partner.zip or '00000',
-            'customer.givenName': (partner.name or 'First Last').split()[0],
-            'customer.surname': (partner.name or 'First Last').split()[-1]
-        })
-
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
         response_content['action_url'] = '/payment/hyperpay'
@@ -86,12 +62,10 @@ class PaymentTransaction(models.Model):
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
-
         if hyperpay_provider.state == 'enabled':
-            payment_url = f"https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
+            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         else:
-            payment_url = f"https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
-
+            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         response_content['payment_url'] = payment_url
         return response_content
 
@@ -155,8 +129,7 @@ class PaymentTransaction(models.Model):
                         break
 
             if not tx_status_set:
-                _logger.warning(
-                    "Received unrecognized payment state %s for transaction with reference %s\nDetailed Message:%s",
-                    status_code, self.reference, status.get('description')
-                )
+                _logger.warning("Received unrecognized payment state %s for "
+                                "transaction with reference %s\nDetailed Message:%s", status_code, self.reference,
+                                status.get('description'))
                 self._set_error("HyperPay: " + _("Invalid payment status."))
