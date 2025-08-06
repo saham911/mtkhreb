@@ -37,37 +37,62 @@ class PaymentTransaction(models.Model):
             raise odoo.exceptions.UserError("This currency is not supported with selected payment method.")
         return self.hyperpay_execute_payment()
 
-    def hyperpay_execute_payment(self):
-        hyperpay_provider = self.provider_id
-        payment_method_code = self.payment_method_id.code
+def hyperpay_execute_payment(self):
+    hyperpay_provider = self.provider_id
+    payment_method_code = self.payment_method_id.code
 
-        if payment_method_code == 'mada':
-            entity_id = hyperpay_provider.hyperpay_merchant_id_mada
-        else:
-            entity_id = hyperpay_provider.hyperpay_merchant_id
-        if not entity_id:
-            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+    if payment_method_code == 'mada':
+        entity_id = hyperpay_provider.hyperpay_merchant_id_mada
+    else:
+        entity_id = hyperpay_provider.hyperpay_merchant_id
 
-        request_values = {
-            'entityId': '%s' % entity_id,
-            'amount': "{:.2f}".format(self.amount),
-            'currency': self.currency_id.name,
-            'paymentType': 'DB',
-            'merchantTransactionId': self.reference,
-        }
-        response_content = self.provider_id._hyperpay_make_request(request_values)
+    if not entity_id:
+        raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-        response_content['action_url'] = '/payment/hyperpay'
-        response_content['checkout_id'] = response_content.get('id')
-        response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
-        response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
-        response_content['paymentMethodCode'] = payment_method_code
-        if hyperpay_provider.state == 'enabled':
-            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
-        else:
-            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
-        response_content['payment_url'] = payment_url
-        return response_content
+    request_values = {
+        'entityId': '%s' % entity_id,
+        'amount': "{:.2f}".format(self.amount),
+        'currency': self.currency_id.name,
+        'paymentType': 'DB',
+        'merchantTransactionId': self.reference,
+    }
+
+    # ✅ Only for test environment
+    if hyperpay_provider.state != 'enabled':  # test mode
+        request_values.update({
+            'testMode': 'EXTERNAL',
+            'customParameters[3DS2_enrolled]': 'true'
+        })
+
+    # ✅ Customer billing info
+    partner = self.partner_id
+    request_values.update({
+        'customer.email': partner.email or 'test@example.com',
+        'billing.street1': partner.street or 'Unknown Street',
+        'billing.city': partner.city or 'Unknown City',
+        'billing.state': partner.state_id.name if partner.state_id else 'Unknown State',
+        'billing.country': partner.country_id.code if partner.country_id else 'SA',  # ISO Alpha-2 code
+        'billing.postcode': partner.zip or '00000',
+        'customer.givenName': partner.name.split()[0] if partner.name else 'First',
+        'customer.surname': partner.name.split()[-1] if partner.name and len(partner.name.split()) > 1 else 'Last'
+    })
+
+    response_content = self.provider_id._hyperpay_make_request(request_values)
+
+    response_content['action_url'] = '/payment/hyperpay'
+    response_content['checkout_id'] = response_content.get('id')
+    response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
+    response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
+    response_content['paymentMethodCode'] = payment_method_code
+
+    if hyperpay_provider.state == 'enabled':
+        payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+    else:
+        payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+
+    response_content['payment_url'] = payment_url
+    return response_content
+
 
     def _get_tx_from_notification_data(self, provider_code, data):
         tx = super()._get_tx_from_notification_data(provider_code, data)
