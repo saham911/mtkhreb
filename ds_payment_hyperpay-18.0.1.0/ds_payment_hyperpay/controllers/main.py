@@ -21,13 +21,23 @@ class HyperPayController(http.Controller):
     @http.route(_return_url, type='http', auth='public', methods=['GET'], csrf=False, save_session=False)
     def hyperpay_return(self, **data):
         _logger.info("handling redirection from HyperPay with data:\n%s", pprint.pformat(data))
-        request.env['payment.transaction'].sudo()._handle_notification_data('hyperpay', data)
+        tx = request.env['payment.transaction'].sudo()._handle_notification_data('hyperpay', data)
+
+        if tx and tx.sale_order_ids:
+            order = tx.sale_order_ids[0]
+            return request.redirect(order.get_portal_url())
+
         return request.redirect('/payment/status')
 
     @http.route(_return_url_mada, type='http', auth='public', methods=['GET'], csrf=False, save_session=False)
     def hyperpay_return_mada(self, **data):
         _logger.info("handling redirection from HyperPay with data:\n%s", pprint.pformat(data))
-        request.env['payment.transaction'].sudo()._handle_notification_data('mada', data)
+        tx = request.env['payment.transaction'].sudo()._handle_notification_data('mada', data)
+
+        if tx and tx.sale_order_ids:
+            order = tx.sale_order_ids[0]
+            return request.redirect(order.get_portal_url())
+
         return request.redirect('/payment/status')
 
     @http.route('/payment/hyperpay', website=True, type='http', auth='public', methods=['POST'], csrf=False, save_session=False)
