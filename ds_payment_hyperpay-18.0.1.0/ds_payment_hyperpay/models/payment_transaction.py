@@ -67,6 +67,7 @@ class PaymentTransaction(models.Model):
             # مطلوب فقط في بيئة الاختبار
             'testMode': 'EXTERNAL',
             'customParameters[3DS2_enrolled]': 'true',
+            'customParameters[SHOPPER_resultUrl]': 'https://www.artcontracting.com/payment/hyperpay/return',
 
             # بيانات العميل بشكل منسق
             'customer.email': partner.email or 'test@example.com',
