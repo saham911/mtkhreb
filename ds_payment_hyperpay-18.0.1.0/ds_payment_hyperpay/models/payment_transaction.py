@@ -62,7 +62,7 @@ class PaymentTransaction(models.Model):
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
-          #  'merchantTransactionId': self.reference,
+            'merchantTransactionId': self.reference,
 
             # مطلوب فقط في بيئة الاختبار
            # 'testMode': 'EXTERNAL',
