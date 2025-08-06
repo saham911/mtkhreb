@@ -45,17 +45,8 @@ class PaymentTransaction(models.Model):
             entity_id = hyperpay_provider.hyperpay_merchant_id_mada
         else:
             entity_id = hyperpay_provider.hyperpay_merchant_id
-
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
-
-        partner = self.partner_id
-
-        # تقسيم الاسم بشكل واقعي لتفادي تكرار الاسم الأول واللقب
-        full_name = partner.name or 'abod almeshal'
-        split_name = full_name.strip().split()
-        given_name = split_name[0]
-        surname = split_name[1] if len(split_name) > 1 else 'test'
 
         request_values = {
             'entityId': '%s' % entity_id,
@@ -63,30 +54,18 @@ class PaymentTransaction(models.Model):
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
-            'customParameters[3DS2_enrolled]': 'true',
-            'shopperResultUrl': 'https://www.artcontracting.com/payment/hyperpay/return',
-            'customer.email': partner.email or 'test@example.com',
-            'customer.givenName': given_name,
-            'customer.surname': surname,
-            'billing.street1': partner.street or 'Test Street',
-            'billing.city': partner.city or 'Test City',
-            'billing.state': partner.state_id.code if partner.state_id else 'RD',
-            'billing.country': partner.country_id.code if partner.country_id else 'SA',
-            'billing.postcode': partner.zip or '12345',
         }
-
         response_content = self.provider_id._hyperpay_make_request(request_values)
+
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
-
         if hyperpay_provider.state == 'enabled':
             payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         else:
             payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
-
         response_content['payment_url'] = payment_url
         return response_content
 
@@ -94,26 +73,15 @@ class PaymentTransaction(models.Model):
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
             return tx
-
-        resource_path = data.get('resourcePath')
-        if not resource_path:
-            raise ValidationError(_("HyperPay: Missing resourcePath."))
-
-        payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + resource_path
+        payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + data.get('resourcePath')
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
-
-        reference = notification_data.get('merchantTransactionId') or data.get('id')
+        reference = notification_data.get('merchantTransactionId', False)
         if not reference:
-            raise ValidationError(_("HyperPay: No reference or ID found."))
-
-        # 👇 الحل: إزالة امتدادات مثل ".uat01-vm-tx02"
-        reference = reference.split('.')[0]
-
+            raise ValidationError(_("HyperPay: No reference found."))
         tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
         if not tx:
             raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
-
         tx._handle_hyperpay_payment_status(notification_data)
         return tx
 
