@@ -2,7 +2,7 @@
 #############################################################################
 #
 #    Copyright (C) 2024-TODAY
-#    Author: Odoo DevSouls <odoodevsouls@gmailcom>
+#    Author: Odoo DevSouls <odoodevsouls@gmail.com>
 #
 #############################################################################
 
@@ -45,8 +45,11 @@ class PaymentTransaction(models.Model):
             entity_id = hyperpay_provider.hyperpay_merchant_id_mada
         else:
             entity_id = hyperpay_provider.hyperpay_merchant_id
+
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+
+        partner = self.partner_id
 
         request_values = {
             'entityId': '%s' % entity_id,
@@ -54,7 +57,22 @@ class PaymentTransaction(models.Model):
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
+
+            # Required only for test environment
+            'testMode': 'EXTERNAL',
+            'customParameters[3DS2_enrolled]': 'true',
+
+            # Customer billing data
+            'customer.email': partner.email or 'test@example.com',
+            'customer.givenName': (partner.name or 'First').split(' ')[0],
+            'customer.surname': (partner.name or 'Last').split(' ')[-1],
+            'billing.street1': partner.street or 'Test Street',
+            'billing.city': partner.city or 'Test City',
+            'billing.state': partner.state_id.code if partner.state_id else 'RD',
+            'billing.country': partner.country_id.code if partner.country_id else 'SA',
+            'billing.postcode': partner.zip or '12345',
         }
+
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
         response_content['action_url'] = '/payment/hyperpay'
@@ -62,10 +80,12 @@ class PaymentTransaction(models.Model):
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
+
         if hyperpay_provider.state == 'enabled':
             payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         else:
             payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+
         response_content['payment_url'] = payment_url
         return response_content
 
