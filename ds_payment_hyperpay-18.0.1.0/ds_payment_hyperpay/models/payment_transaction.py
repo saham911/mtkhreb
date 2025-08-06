@@ -62,12 +62,12 @@ class PaymentTransaction(models.Model):
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
-            'merchantTransactionId': self.reference,
+          #  'merchantTransactionId': self.reference,
 
             # مطلوب فقط في بيئة الاختبار
-            'testMode': 'EXTERNAL',
+           # 'testMode': 'EXTERNAL',
             'customParameters[3DS2_enrolled]': 'true',
-            'customParameters[SHOPPER_resultUrl]': 'https://www.artcontracting.com/payment/hyperpay/return',
+            'shopperResultUrl': 'https://www.artcontracting.com/payment/hyperpay/return',
 
             # بيانات العميل بشكل منسق
             'customer.email': partner.email or 'test@example.com',
