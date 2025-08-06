@@ -51,6 +51,7 @@ class PaymentTransaction(models.Model):
 
         partner = self.partner_id
 
+        # تقسيم الاسم بشكل واقعي لتفادي تكرار الاسم الأول واللقب
         full_name = partner.name or 'abod almeshal'
         split_name = full_name.strip().split()
         given_name = split_name[0]
@@ -75,7 +76,6 @@ class PaymentTransaction(models.Model):
         }
 
         response_content = self.provider_id._hyperpay_make_request(request_values)
-
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
@@ -103,10 +103,12 @@ class PaymentTransaction(models.Model):
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
 
-        # جلب المرجع من الرد أو من البيانات نفسها
         reference = notification_data.get('merchantTransactionId') or data.get('id')
         if not reference:
             raise ValidationError(_("HyperPay: No reference or ID found."))
+
+        # 👇 الحل: إزالة امتدادات مثل ".uat01-vm-tx02"
+        reference = reference.split('.')[0]
 
         tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
         if not tx:
