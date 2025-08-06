@@ -2,7 +2,7 @@
 #############################################################################
 #
 #    Copyright (C) 2024-TODAY
-#    Author: Odoo DevSouls <odoodevsouls@gmail.com>
+#    Author: Odoo DevSouls <odoodevsouls@gmailcom>
 #
 #############################################################################
 
@@ -51,6 +51,12 @@ class PaymentTransaction(models.Model):
 
         partner = self.partner_id
 
+        # تقسيم الاسم بشكل واقعي لتفادي تكرار الاسم الأول واللقب
+        full_name = partner.name or 'abod almeshal'
+        split_name = full_name.strip().split()
+        given_name = split_name[0]
+        surname = split_name[1] if len(split_name) > 1 else 'test'
+
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
@@ -58,14 +64,14 @@ class PaymentTransaction(models.Model):
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
 
-            # Required only for test environment
+            # مطلوب فقط في بيئة الاختبار
             'testMode': 'EXTERNAL',
             'customParameters[3DS2_enrolled]': 'true',
 
-            # Customer billing data
+            # بيانات العميل بشكل منسق
             'customer.email': partner.email or 'test@example.com',
-            'customer.givenName': (partner.name or 'First').split(' ')[0],
-            'customer.surname': (partner.name or 'Last').split(' ')[-1],
+            'customer.givenName': given_name,
+            'customer.surname': surname,
             'billing.street1': partner.street or 'Test Street',
             'billing.city': partner.city or 'Test City',
             'billing.state': partner.state_id.code if partner.state_id else 'RD',
