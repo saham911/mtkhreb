@@ -51,7 +51,6 @@ class PaymentTransaction(models.Model):
 
         partner = self.partner_id
 
-        # تقسيم الاسم بشكل واقعي لتفادي تكرار الاسم الأول واللقب
         full_name = partner.name or 'abod almeshal'
         split_name = full_name.strip().split()
         given_name = split_name[0]
@@ -63,13 +62,8 @@ class PaymentTransaction(models.Model):
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
-
-            # مطلوب فقط في بيئة الاختبار
-           # 'testMode': 'EXTERNAL',
             'customParameters[3DS2_enrolled]': 'true',
             'shopperResultUrl': 'https://www.artcontracting.com/payment/hyperpay/return',
-
-            # بيانات العميل بشكل منسق
             'customer.email': partner.email or 'test@example.com',
             'customer.givenName': given_name,
             'customer.surname': surname,
@@ -100,15 +94,24 @@ class PaymentTransaction(models.Model):
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
             return tx
-        payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + data.get('resourcePath')
+
+        resource_path = data.get('resourcePath')
+        if not resource_path:
+            raise ValidationError(_("HyperPay: Missing resourcePath."))
+
+        payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + resource_path
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
-        reference = notification_data.get('merchantTransactionId', False)
+
+        # جلب المرجع من الرد أو من البيانات نفسها
+        reference = notification_data.get('merchantTransactionId') or data.get('id')
         if not reference:
-            raise ValidationError(_("HyperPay: No reference found."))
+            raise ValidationError(_("HyperPay: No reference or ID found."))
+
         tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
         if not tx:
             raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
+
         tx._handle_hyperpay_payment_status(notification_data)
         return tx
 
