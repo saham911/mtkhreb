@@ -42,53 +42,30 @@ class PaymentTransaction(models.Model):
         payment_method_code = self.payment_method_id.code
 
         if payment_method_code == 'mada':
-           entity_id = hyperpay_provider.hyperpay_merchant_id_mada
+            entity_id = hyperpay_provider.hyperpay_merchant_id_mada
         else:
-           entity_id = hyperpay_provider.hyperpay_merchant_id
+            entity_id = hyperpay_provider.hyperpay_merchant_id
         if not entity_id:
-           raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-    # بيانات ثابتة للاختبار كما طلبها HyperPay
         request_values = {
-           'entityId': entity_id,
-           'amount': "{:.2f}".format(self.amount),
-           'currency': self.currency_id.name,
-           'paymentType': 'DB',
-           'merchantTransactionId': self.reference,
-           'testMode': 'EXTERNAL',  # فقط لسيرفر الاختبار
-           'customParameters[3DS2_enrolled]': 'true',  # فقط لسيرفر الاختبار
-        
-        # بيانات العميل الثابتة للاختبار
-           'customer.email': 'test.customer@example.com',
-           'billing.street1': '123 Test Street',
-           'billing.city': 'Riyadh',
-           'billing.state': 'RUH',  # رمز المنطقة
-           'billing.country': 'SA',  # كود الدولة (SA للمملكة العربية السعودية)
-           'billing.postcode': '12345',
-           'customer.givenName': 'Test',
-           'customer.surname': 'Customer',
-           'customer.phone': '+966501234567'
+            'entityId': '%s' % entity_id,
+            'amount': "{:.2f}".format(self.amount),
+            'currency': self.currency_id.name,
+            'paymentType': 'DB',
+            'merchantTransactionId': self.reference,
         }
-
-    # إرسال الطلب
         response_content = self.provider_id._hyperpay_make_request(request_values)
-
-    # معالجة الرد
-        if 'result' not in response_content or 'code' not in response_content['result']:
-            raise ValidationError(_("HyperPay: Invalid response from payment gateway."))
 
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
-    
-    # تحديد عنوان URL للدفع بناءً على حالة الموفر
         if hyperpay_provider.state == 'enabled':
-          payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         else:
-          payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
-    
+            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         response_content['payment_url'] = payment_url
         return response_content
 
