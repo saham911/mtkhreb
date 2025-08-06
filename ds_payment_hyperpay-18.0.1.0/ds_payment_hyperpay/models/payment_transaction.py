@@ -71,7 +71,7 @@ class PaymentTransaction(models.Model):
             'customer.email': partner.email or 'test@example.com',
             'billing.street1': partner.street or 'Unknown Street',
             'billing.city': partner.city or 'Unknown City',
-            'billing.state': partner.state_id.name if partner.state_id else 'Unknown State',
+            'billing.state': partner.state_id.code or partner.state_id.name if partner.state_id else '',
             'billing.country': partner.country_id.code if partner.country_id else 'SA',
             'billing.postcode': partner.zip or '00000',
             'customer.givenName': partner.name.split()[0] if partner.name else 'First',
