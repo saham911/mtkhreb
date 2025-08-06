@@ -34,57 +34,56 @@ class PaymentTransaction(models.Model):
         res = super()._get_specific_rendering_values(processing_values)
         if self.provider_code != 'hyperpay':
             return res
-        if self.currency_id.id not in self.payment_method_id.supported_currency_ids.ids:
-            raise ValidationError(_("This currency is not supported with selected payment method."))
+        if self.currency_id.name != 'SAR':
+            raise ValidationError(_("Only SAR currency is supported for HyperPay"))
         
         try:
-            return self._execute_hyperpay_payment(processing_values)
+            return self._execute_hyperpay_payment()
         except Exception as e:
             _logger.error("HyperPay payment execution failed: %s", str(e), exc_info=True)
             raise ValidationError(_("Payment processing error. Please try again later."))
 
-    def _execute_hyperpay_payment(self, processing_values):
-        """ تنفيذ عملية الدفع عبر HyperPay """
+    def _execute_hyperpay_payment(self):
+        """ تنفيذ عملية الدفع عبر HyperPay مع جميع متطلبات API """
         provider = self.provider_id
         partner = self.partner_id
         
-        # ===== التحقق من البيانات الأساسية =====
+        # التحقق من التهيئة الأساسية
         if not provider.hyperpay_merchant_id:
             raise ValidationError(_("HyperPay merchant ID is not configured"))
-        
-        # ===== تنظيف وتنسيق البيانات =====
-        def clean_field(value, max_length=None):
-            value = re.sub(r'[^\w\s\-\.@]', '', str(value or '')).strip()
-            return value[:max_length] if max_length else value
 
-        email = clean_field(partner.email)
-        if '@' not in email:
+        # التحقق من صحة البريد الإلكتروني
+        if not re.match(r'^[^@]+@[^@]+\.[^@]+$', partner.email or ''):
             raise ValidationError(_("Invalid email address format"))
 
-        # ===== إعداد بيانات الطلب =====
+        # إعداد بيانات الطلب الأساسية حسب متطلبات HyperPay
         request_values = {
             'entityId': provider.hyperpay_merchant_id,
             'amount': "{:.2f}".format(self.amount),
-            'currency': self.currency_id.name,
-            'paymentType': 'DB',
+            'currency': 'SAR',  # العملة ثابتة حسب المتطلبات
+            'paymentType': 'DB',  # نوع الدفع ثابت حسب المتطلبات
             'merchantTransactionId': self.reference,
-            'testMode': 'EXTERNAL',
-            'customParameters[3DS2_enrolled]': 'true',
-            'customer.email': email,
-            'customer.givenName': clean_field(partner.name.split()[0], 30),
-            'customer.surname': clean_field(' '.join(partner.name.split()[1:]), 30),
-            'billing.street1': clean_field(partner.street, 50),
-            'billing.city': clean_field(partner.city, 30),
-            'billing.postcode': clean_field(partner.zip, 10),
+            'testMode': 'EXTERNAL',  # مطلوب للوضع الاختباري
+            'customParameters[3DS2_enrolled]': 'true',  # مطلوب لـ 3D Secure
+            'customer.email': partner.email,
+            'billing.street1': (partner.street or '')[:50],  # تقليل الطول إذا لزم الأمر
+            'billing.city': (partner.city or '')[:30],
             'billing.country': (partner.country_id.code or '').upper(),
+            'billing.postcode': partner.zip or '',
         }
 
-        # إضافة حقول اختيارية إذا كانت موجودة
+        # معالجة الاسم حسب متطلبات givenName و surname
+        name_parts = (partner.name or '').strip().split()
+        request_values.update({
+            'customer.givenName': name_parts[0] if name_parts else '',
+            'customer.surname': ' '.join(name_parts[1:]) if len(name_parts) > 1 else (name_parts[0] if name_parts else '')
+        })
+
+        # إضافة الولاية إذا كانت متاحة
         if partner.state_id:
-            request_values['billing.state'] = clean_field(
-                partner.state_id.code or partner.state_id.name, 30
-            )
-        
+            request_values['billing.state'] = partner.state_id.code or partner.state_id.name or ''
+
+        # إضافة رقم الهاتف إذا كان متاحاً
         if partner.phone:
             phone = re.sub(r'[^\d+]', '', partner.phone)
             if phone and not phone.startswith('+'):
@@ -93,23 +92,22 @@ class PaymentTransaction(models.Model):
 
         _logger.info("HyperPay Request Values: %s", request_values)
         
-        # ===== إرسال الطلب إلى HyperPay =====
+        # إرسال الطلب إلى HyperPay
         response = provider._hyperpay_make_request(request_values)
         _logger.info("HyperPay Response: %s", response)
 
         if not response.get('id'):
-            _logger.error("Invalid HyperPay response: %s", response)
-            raise ValidationError(_("Payment gateway error. Please try again."))
+            raise ValidationError(_("Payment gateway error - No transaction ID received"))
 
-        # ===== إعداد بيانات الرد =====
-        base_url = provider.get_base_url()
+        # إعداد بيانات الرد مع إضافة سكريبت 3D Secure المطلوب
         return {
-            'action_url': urls.url_join(base_url, '/payment/hyperpay'),
+            'action_url': urls.url_join(provider.get_base_url(), '/payment/hyperpay'),
             'checkout_id': response['id'],
             'merchantTransactionId': self.reference,
             'formatted_amount': format_amount(self.env, self.amount, self.currency_id),
             'paymentMethodCode': 'hyperpay',
-            'payment_url': f"https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId={response['id']}",
+            'payment_url': "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response['id'],
+            'wpwl_options': {'paymentTarget': '_top'},  # إضافة إعدادات 3D Secure المطلوبة
             **response
         }
 
@@ -126,7 +124,7 @@ class PaymentTransaction(models.Model):
                 raise ValidationError(_("Missing payment resource path"))
 
             provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
-            status_url = provider.get_hyperpay_urls()['hyperpay_process_url'] + data['resourcePath']
+            status_url = urls.url_join(provider.get_hyperpay_urls()['hyperpay_process_url'], data['resourcePath'])
             notification_data = provider._hyperpay_get_payment_status(status_url, provider_code)
             
             reference = notification_data.get('merchantTransactionId')
@@ -145,7 +143,7 @@ class PaymentTransaction(models.Model):
             raise ValidationError(_("Could not verify payment status. Please contact support."))
 
     def _process_hyperpay_notification(self, notification_data):
-        """ معالجة إشعار الدفع """
+        """ معالجة حالة الدفع مع كود حالة مفصّل """
         status = notification_data.get('result', {})
         status_code = status.get('code', '')
         description = status.get('description', 'No status description')
@@ -155,18 +153,15 @@ class PaymentTransaction(models.Model):
         if 'id' in notification_data:
             self.provider_reference = notification_data['id']
 
-        # معالجة حالات الدفع المختلفة
-        status_types = {
-            'SUCCESS': self._set_done,
-            'SUCCESS_REVIEW': self._set_pending,
-            'PENDING': self._set_error,
-            'REJECTED': self._set_error
-        }
-
-        for status_type, handler in status_types.items():
-            if any(re.search(pattern, status_code) for pattern in hyperpay.PAYMENT_STATUS_CODES_REGEX[status_type]):
-                handler(_(description))
-                return
-
-        _logger.error("Unrecognized payment status code: %s", status_code)
-        self._set_error(_("Unknown payment status: %s") % status_code)
+        # معالجة حالات الدفع المختلفة حسب كود الحالة
+        if any(re.search(pattern, status_code) for pattern in hyperpay.PAYMENT_STATUS_CODES_REGEX['SUCCESS']):
+            self._set_done(_(description))
+        elif any(re.search(pattern, status_code) for pattern in hyperpay.PAYMENT_STATUS_CODES_REGEX['SUCCESS_REVIEW']):
+            self._set_pending(_(description))
+        elif any(re.search(pattern, status_code) for pattern in hyperpay.PAYMENT_STATUS_CODES_REGEX['PENDING']):
+            self._set_error(_(description))
+        elif any(re.search(pattern, status_code) for pattern in hyperpay.PAYMENT_STATUS_CODES_REGEX['REJECTED']):
+            self._set_error(_(description))
+        else:
+            _logger.error("Unrecognized payment status code: %s", status_code)
+            self._set_error(_("Unknown payment status: %s") % status_code)
