@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Payment Methods Definitions -->
+    <!-- Payment Methods -->
     <record id="payment_method_hyperpay" model="payment.method">
-        <field name="name">HyperPay (VISA/Master Card)</field>
+        <field name="name">HyperPay (VISA/MasterCard)</field>
         <field name="code">hyperpay</field>
         <field name="sequence">4</field>
         <field name="image" type="base64" file="ds_payment_hyperpay/static/description/visa.png"/>
@@ -37,18 +37,19 @@
     <record id="payment_provider_hyperpay" model="payment.provider">
         <field name="name">HyperPay</field>
         <field name="code">hyperpay</field>
-        <field name="state">test</field> <!-- test or enabled -->
+        <field name="state">test</field>
         <field name="image_128" type="base64" file="ds_payment_hyperpay/static/description/icon.png"/>
         
         <!-- Merchant Credentials -->
         <field name="hyperpay_merchant_id">8ac7a4ca97e6e8350197e9063c26026c</field>
         <field name="hyperpay_merchant_id_mada">8ac7a4ca97e6e8350197e906c6fb0279</field>
+        <field name="hyperpay_secret_key">YOUR_TEST_ACCESS_TOKEN</field>
         
         <!-- Technical Settings -->
         <field name="module_id" ref="base.module_ds_payment_hyperpay"/>
         <field name="redirect_form_view_id" ref="ds_payment_hyperpay.hyperpay_redirect_form"/>
         
-        <!-- Payment Methods Assignment -->
+        <!-- Payment Methods -->
         <field name="payment_method_ids"
                eval="[Command.set([
                          ref('ds_payment_hyperpay.payment_method_hyperpay'),
@@ -56,7 +57,7 @@
                      ])]"
         />
         
-        <!-- Display Messages -->
+        <!-- Messages -->
         <field name="pre_msg">You will be redirected to HyperPay payment page</field>
         <field name="error_msg">Payment processing failed. Please try again.</field>
     </record>
