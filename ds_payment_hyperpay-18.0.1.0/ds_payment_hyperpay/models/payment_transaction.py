@@ -43,25 +43,25 @@ class PaymentTransaction(models.Model):
 
         # اختر الـ entityId حسب MADA أو Visa/Master
         entity_id = (hyperpay_provider.hyperpay_merchant_id_mada
-                 if payment_method_code == 'mada'
-                 else hyperpay_provider.hyperpay_merchant_id)
+                     if payment_method_code == 'mada'
+                     else hyperpay_provider.hyperpay_merchant_id)
         if not entity_id:
-           raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+
+        # URL مطلق للرجوع بعد 3DS
         base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url').rstrip('/')
         shopper_result_url = urls.url_join(base_url + '/', 'payment/hyperpay/return')
-   
+
         # --- بيانات العميل من شريك Odoo ---
         partner = self.partner_id
         email = (partner.email or '').strip()
         full_name = (partner.name or '').strip()
-        # تقسيم الاسم إلى اسم أول واسم عائلة بشكل بسيط
         given_name = full_name.split(' ', 1)[0] if full_name else ''
         surname = full_name.split(' ', 1)[1] if ' ' in full_name else ''
-
         street1 = (partner.street or '').strip()
         city = (partner.city or '').strip()
         state = (partner.state_id.code or partner.state_id.name or '').strip() if partner.state_id else ''
-        country = (partner.country_id.code or '').strip()  # ISO Alpha-2 متوفر في Odoo
+        country = (partner.country_id.code or '').strip()  # ISO Alpha-2
         postcode = (partner.zip or '').strip()
 
         # --- القيم الأساسية للطلب ---
@@ -70,33 +70,38 @@ class PaymentTransaction(models.Model):
             'amount': f"{self.amount:.2f}",
             'currency': self.currency_id.name,
             'paymentType': 'DB',
-        # unique ID in your DB -> نستخدم مرجع المعاملة القياسي من Odoo
-            'merchantTransactionId': self.reference,
+            'merchantTransactionId': self.reference,  # unique ID في DB
 
-        # --- بيانات العميل المطلوبة من HyperPay ---
+            # --- بيانات العميل المطلوبة من HyperPay ---
             'customer.email': email,
             'customer.givenName': given_name,
             'customer.surname': surname,
 
-        # --- عناوين الفوترة ---
+            # --- عناوين الفوترة ---
             'billing.street1': street1,
             'billing.city': city,
             'billing.state': state,
-            'billing.country': country,  # يجب أن يكون Alpha-2
+            'billing.country': country,  # Alpha-2
             'billing.postcode': postcode,
-            
-            'shopperResultUrl': shopper_result_url,
-    }
 
-    # فقط على خادم الاختبار: testMode + 3DS enrolled
+            # لازم للرجوع على دومينك بعد 3DS
+            'shopperResultUrl': shopper_result_url,
+        }
+
+        # فقط على خادم الاختبار: testMode + 3DS enrolled
         if hyperpay_provider.state != 'enabled':
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
 
-    # تنفيذ الطلب لإنشاء checkout_id
+        # تنفيذ الطلب لإنشاء checkout_id
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
-    # تجهيز قيم واجهة الدفع
+        # احفظ الـ checkout_id كـ provider_reference للعثور على المعاملة لاحقاً
+        checkout_id = response_content.get('id')
+        if checkout_id:
+            self.provider_reference = checkout_id
+
+        # تجهيز قيم واجهة الدفع
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
@@ -105,28 +110,48 @@ class PaymentTransaction(models.Model):
         response_content['return_url'] = shopper_result_url
 
         if hyperpay_provider.state == 'enabled':
-           payment_url = f"https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
+            payment_url = f"https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
         else:
-           payment_url = f"https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
+            payment_url = f"https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
         response_content['payment_url'] = payment_url
         return response_content
-
 
     def _get_tx_from_notification_data(self, provider_code, data):
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
             return tx
+
         payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + data.get('resourcePath')
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
-        reference = notification_data.get('merchantTransactionId', False)
-        if not reference:
-            raise ValidationError(_("HyperPay: No reference found."))
-        tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
-        if not tx:
-            raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
-        tx._handle_hyperpay_payment_status(notification_data)
-        return tx
+
+        # 1) المحاولة الأساسية: merchantTransactionId
+        reference = notification_data.get('merchantTransactionId')
+        if reference:
+            tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')], limit=1)
+            if not tx:
+                raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
+            tx._handle_hyperpay_payment_status(notification_data)
+            return tx
+
+        # 2) Fallback: ابحث بالـ checkout_id المخزّن كـ provider_reference
+        # يأتي من باراميترات الريديركت (id)، أو من رد الحالة (ndc)، أو من resourcePath
+        checkout_id = data.get('id') or notification_data.get('ndc')
+        if not checkout_id:
+            # محاولة أخيرة: استخرج الـ id من resourcePath: /v1/checkouts/<ID>/payment
+            rp = data.get('resourcePath') or ''
+            parts = rp.split('/checkouts/')
+            if len(parts) == 2:
+                checkout_id = parts[1].split('/payment')[0]
+
+        if checkout_id:
+            tx = self.search([('provider_reference', '=', checkout_id), ('provider_code', '=', 'hyperpay')], limit=1)
+            if tx:
+                tx._handle_hyperpay_payment_status(notification_data)
+                return tx
+
+        # إذا ما قدرنا نحددها بأي شكل
+        raise ValidationError(_("HyperPay: No reference found."))
 
     def _handle_hyperpay_payment_status(self, notification_data):
         tx_status_set = False
@@ -172,7 +197,8 @@ class PaymentTransaction(models.Model):
                         break
 
             if not tx_status_set:
-                _logger.warning("Received unrecognized payment state %s for "
-                                "transaction with reference %s\nDetailed Message:%s", status_code, self.reference,
-                                status.get('description'))
+                _logger.warning(
+                    "Received unrecognized payment state %s for transaction with reference %s\nDetailed Message:%s",
+                    status_code, self.reference, status.get('description')
+                )
                 self._set_error("HyperPay: " + _("Invalid payment status."))
