@@ -51,7 +51,6 @@
                   maskCvv: true,
                   brandDetection: true,
                   locale: "en",
-                  paymentTarget: "_top",
                 onReady: function(){
                     $(".wpwl-group-cardNumber").after($(".wpwl-group-brand").detach());
                     $(".wpwl-group-cvv").after( $(".wpwl-group-cardHolder").detach());
@@ -102,7 +101,7 @@
                             <h2 class="payment_title">Payment Details</h2>
                         </div>
                         <div class="row">
-                            <form class="paymentWidgets" t-att-data-brands="brands"></form>
+                            <form t-att-action="return_url" class="paymentWidgets" t-att-data-brands="brands"></form>
                         </div>
                         <div class="d-flex flex-column flex-md-row align-md-items-center justify-content-between gap-2 mt-2">
                              <p name="o_payment_secured_by" class="align-self-end mb-0 ms-auto small text-600">
