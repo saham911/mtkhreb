@@ -61,11 +61,11 @@ class PaymentTransaction(models.Model):
             'customer.givenName': 'TestFirst',
             'customer.surname': 'TestLast',
 
-           'billing.street1': 'King Fahad Road',
-           'billing.city': 'Riyadh',
-           'billing.state': 'RUH',
-           'billing.country': 'SA',
-           'billing.postcode': '12345',
+            'billing.street1': 'King Fahad Road',
+            'billing.city': 'Riyadh',
+            'billing.state': 'RUH',
+            'billing.country': 'SA',
+            'billing.postcode': '12345',
         }
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
