@@ -46,52 +46,31 @@ class PaymentProvider(models.Model):
             }
 
     def _hyperpay_make_request(self, data):
-        """Create checkout (returns checkout id)."""
         self.ensure_one()
         try:
             url = self.get_hyperpay_urls()['hyperpay_form_url']
             opener = build_opener(HTTPHandler)
-            payload = urlencode(data).encode('utf-8')
-            request = Request(url, data=payload)
-            request.add_header('Authorization', f'Bearer {self.hyperpay_secret_key}')
-            request.add_header('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8')
+            request = Request(url, data=urlencode(data).encode('utf-8'))
+            request.add_header('Authorization', 'Bearer %s' % self.hyperpay_secret_key)
             request.get_method = lambda: 'POST'
-
-            # Logs for visibility in test env
-            _logger.info("HyperPay >> URL: %s", url)
-            _logger.info("HyperPay >> Payload (raw): %s", payload.decode('utf-8'))
-
-            response = opener.open(request, timeout=30)
-            raw = response.read()
-            _logger.info("HyperPay << Response: %s", raw.decode('utf-8'))
-            return json.loads(raw)
+            response = opener.open(request)
+            return json.loads(response.read())
         except HTTPError as e:
-            body = e.read().decode('utf-8')
-            _logger.error("HyperPay !! HTTPError %s: %s", e.code, body)
-            return json.loads(body)
+            return json.loads(e.read())
         except URLError as e:
-            _logger.error("HyperPay !! URLError: %s", e.reason)
             return e.reason
 
     def _hyperpay_get_payment_status(self, url, provider_code):
-        """Fetch payment status using resourcePath + entityId."""
         merchant_id = self.hyperpay_merchant_id_mada if provider_code == 'mada' else self.hyperpay_merchant_id
         url += '?entityId=%s' % merchant_id
         try:
             opener = build_opener(HTTPHandler)
             request = Request(url, data=b'')
-            request.add_header('Authorization', f'Bearer {self.hyperpay_secret_key}')
+            request.add_header('Authorization', 'Bearer %s' % self.hyperpay_secret_key)
             request.get_method = lambda: 'GET'
-
-            _logger.info("HyperPay STATUS >> URL: %s", url)
-            response = opener.open(request, timeout=30)
-            raw = response.read()
-            _logger.info("HyperPay STATUS << Response: %s", raw.decode('utf-8'))
-            return json.loads(raw)
+            response = opener.open(request)
+            return json.loads(response.read())
         except HTTPError as e:
-            body = e.read().decode('utf-8')
-            _logger.error("HyperPay STATUS !! HTTPError %s: %s", e.code, body)
-            return json.loads(body)
+            return json.loads(e.read())
         except URLError as e:
-            _logger.error("HyperPay STATUS !! URLError: %s", e.reason)
             return e.reason
