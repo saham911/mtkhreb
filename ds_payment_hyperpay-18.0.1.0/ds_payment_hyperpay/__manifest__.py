@@ -1,35 +1,32 @@
+# -*- coding: utf-8 -*-
+#############################################################################
+#
+#    Copyright (C) 2024-TODAY
+#    Author: Odoo DevSouls <odoodevsouls@gmailcom>
+#
+#############################################################################
 {
-    'name': "HyperPay Payment Gateway",
+    'name': "Hyperpay Payment Gateway",
     'version': '18.0.1.0',
     'category': 'Accounting/Payment Providers',
     'sequence': 51,
-    'summary': 'Integration with HyperPay payment gateway for MADA, Visa and MasterCard payments',
-    'description': """
-        Complete integration with HyperPay payment gateway
-        Supports MADA, Visa and MasterCard payments
-        Designed for Saudi Arabian market
-    """,
+    'summary': 'Hyperpay Payment Gateway to intergrate Mada Card, Visa Card and Master Card payments. It supports Credit cards, Debit Cards and MADA Card payments in KSA, Saudi Arabia',
     'author': 'DevSouls',
-    'support': "odoodevsouls@gmail.com",
-    'website': "https://www.dev-souls.com",
+    'support': "odoodevsouls@gmailcom",
     'images': ['static/description/banner.png'],
+    'description': "Hyperpay Payment Gateway (Mada/Visa/Master), MADA Payments in KSA",
     'depends': ['payment', 'website_sale'],
     'data': [
-        'data/payment_provider_data.xml',
         'views/payment_provider_views.xml',
         'views/payment_hyperpay_templates.xml',
+        'data/payment_provider_data.xml',
     ],
-    'assets': {
-        'web.assets_frontend': [
-            'ds_payment_hyperpay/static/src/js/payment_form.js',
-        ],
-    },
     'post_init_hook': 'post_init_hook',
     'uninstall_hook': 'uninstall_hook',
     'license': 'OPL-1',
     'installable': True,
-    'application': True,
     'auto_install': False,
+    'application': False,
     'price': 95.0,
     'currency': 'USD'
 }
