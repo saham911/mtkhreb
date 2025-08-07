@@ -47,7 +47,9 @@ class PaymentTransaction(models.Model):
                  else hyperpay_provider.hyperpay_merchant_id)
         if not entity_id:
            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
-
+        base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url').rstrip('/')
+        shopper_result_url = urls.url_join(base_url + '/', 'payment/hyperpay/return')
+   
         # --- بيانات العميل من شريك Odoo ---
         partner = self.partner_id
         email = (partner.email or '').strip()
@@ -82,6 +84,8 @@ class PaymentTransaction(models.Model):
             'billing.state': state,
             'billing.country': country,  # يجب أن يكون Alpha-2
             'billing.postcode': postcode,
+            
+            'shopperResultUrl': shopper_result_url,
     }
 
     # فقط على خادم الاختبار: testMode + 3DS enrolled
@@ -98,6 +102,7 @@ class PaymentTransaction(models.Model):
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
+        response_content['return_url'] = shopper_result_url
 
         if hyperpay_provider.state == 'enabled':
            payment_url = f"https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
