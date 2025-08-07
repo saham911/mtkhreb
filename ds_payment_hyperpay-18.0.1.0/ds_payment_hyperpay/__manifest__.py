@@ -26,7 +26,7 @@
     },
     'post_init_hook': 'post_init_hook',
     'uninstall_hook': 'uninstall_hook',
-    'license': 'OPL-1',
+    'license': 'LGPL-3',
     'installable': True,
     'application': True,
     'auto_install': False,
