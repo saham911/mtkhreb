@@ -54,18 +54,6 @@ class PaymentTransaction(models.Model):
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
-            'testMode': 'EXTERNAL',
-            'customParameters[3DS2_enrolled]': 'true',
-
-            'customer.email': 'test@example.com',
-            'customer.givenName': 'TestFirst',
-            'customer.surname': 'TestLast',
-
-            'billing.street1': 'King Fahad Road',
-            'billing.city': 'Riyadh',
-            'billing.state': 'RUH',
-            'billing.country': 'SA',
-            'billing.postcode': '12345',
         }
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
