@@ -58,11 +58,16 @@ class PaymentTransaction(models.Model):
         full_name = (partner.name or '').strip()
         given_name = full_name.split(' ', 1)[0] if full_name else ''
         surname = full_name.split(' ', 1)[1] if ' ' in full_name else ''
+
         street1 = (partner.street or '').strip()
         city = (partner.city or '').strip()
         state = (partner.state_id.code or partner.state_id.name or '').strip() if partner.state_id else ''
         country = (partner.country_id.code or '').strip()  # ISO Alpha-2
         postcode = (partner.zip or '').strip()
+
+        # Fallback بسيط للـ state (لا ترسله فاضي)
+        if not state and country == 'SA':
+            state = 'Riyadh'  # عدّلها إن رغبت حسب عنوان العميل
 
         # --- القيم الأساسية للطلب ---
         request_values = {
@@ -72,23 +77,28 @@ class PaymentTransaction(models.Model):
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,  # unique ID في DB
 
-            # --- بيانات العميل المطلوبة من HyperPay ---
-            'customer.email': email,
-            'customer.givenName': given_name,
-            'customer.surname': surname,
+            # بيانات العميل
+            'customer.email': email or '',
+            'customer.givenName': given_name or '',
+            'customer.surname': surname or '',
 
-            # --- عناوين الفوترة ---
-            'billing.street1': street1,
-            'billing.city': city,
-            'billing.state': state,
-            'billing.country': country,  # Alpha-2
-            'billing.postcode': postcode,
-
-            # لازم للرجوع على دومينك بعد 3DS
+            # الرجوع على دومينك بعد 3DS
             'shopperResultUrl': shopper_result_url,
         }
 
-        # فقط على خادم الاختبار: testMode + 3DS enrolled
+        # لا ترسل مفاتيح بقيم فارغة في الفوترة
+        if street1:
+            request_values['billing.street1'] = street1
+        if city:
+            request_values['billing.city'] = city
+        if state:
+            request_values['billing.state'] = state
+        if country:
+            request_values['billing.country'] = country
+        if postcode:
+            request_values['billing.postcode'] = postcode
+
+        # وضع الاختبار فقط
         if hyperpay_provider.state != 'enabled':
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
@@ -124,6 +134,7 @@ class PaymentTransaction(models.Model):
         payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + data.get('resourcePath')
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
+        _logger.info("HyperPay notification_data: %s", notification_data)
 
         # 1) المحاولة الأساسية: merchantTransactionId
         reference = notification_data.get('merchantTransactionId')
