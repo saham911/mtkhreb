@@ -41,161 +41,95 @@ class PaymentTransaction(models.Model):
         hyperpay_provider = self.provider_id
         payment_method_code = self.payment_method_id.code
 
-        # 1. جلب معرف التاجر من الإعدادات
         if payment_method_code == 'mada':
-            entity_id = hyperpay_provider.merchant_id_mada  # تغيير اسم الحقل ليتطابق مع الإعدادات
+            entity_id = hyperpay_provider.hyperpay_merchant_id_mada
         else:
-            entity_id = hyperpay_provider.merchant_id  # تغيير اسم الحقل ليتطابق مع الإعدادات
-    
-        # 2. التحقق من وجود المعرف
+            entity_id = hyperpay_provider.hyperpay_merchant_id
         if not entity_id:
-            error_msg = _("""
-            لم يتم تهيئة إعدادات الدفع بشكل صحيح.
-            - للبطاقات الدولية: %s
-            - لبطاقات مدى: %s
-            """) % (
-                hyperpay_provider.merchant_id,
-                hyperpay_provider.merchant_id_mada
-            )
-            _logger.error(error_msg)
-            raise ValidationError(error_msg)
+            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-        # 3. تسجيل البيانات للإفادة
-        _logger.info("""
-        إعدادات هايبر باي:
-        - نوع البطاقة: %s
-        - معرف التاجر: %s
-        - وضع التشغيل: %s
-        """, 
-        payment_method_code, 
-        entity_id,
-        'Test Mode' if hyperpay_provider.state == 'test' else 'Production'
-        )
-
-        # معالجة البيانات المطلوبة بدقة
-        partner = self.partner_id
-        
-        # تحسين معالجة الاسم
-        name_parts = (partner.name or 'Test User').strip().split()
-        given_name = name_parts[0] if name_parts else 'Test'
-        surname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else 'User'
-        
-        # معالجة العنوان بدقة
-        street_parts = []
-        if partner.street:
-            street_parts.append(partner.street.strip())
-        if partner.street2:
-            street_parts.append(partner.street2.strip())
-        street = ', '.join(street_parts) or 'Al arid, Abubaker'
-        
-        # تنظيف بيانات الولاية
-        state_code = 'RUH'  # نستخدم RUH كقيمة افتراضية للرياض
-        if partner.state_id and partner.state_id.code:
-            state_code = re.sub(r'\s+', '', partner.state_id.code.upper().strip())[:10]
-        
-        # تنظيف الرمز البريدي
-        zip_code = re.sub(r'[^0-9]', '', partner.zip or '11322')[:20] or '11322'
-        
-        # بيانات الطلب المعدلة
         request_values = {
-            'entityId': entity_id,
+            'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
-            
-            # معلمات الاختبار الإلزامية
-            'testMode': 'EXTERNAL',
-            'customParameters[3DS2_enrolled]': 'true',
-            
-            # معلومات العميل
-            'customer.email': (partner.email or 'test@example.com').strip(),
-            'customer.givenName': given_name[:50],
-            'customer.surname': surname[:50],
-            
-            # معلومات الفاتورة الدقيقة
-            'billing.street1': street[:255],
-            'billing.city': (partner.city or 'Riyadh').strip()[:50],
-            'billing.state': state_code,
-            'billing.country': 'SA',
-            'billing.postcode': zip_code,
         }
+        response_content = self.provider_id._hyperpay_make_request(request_values)
 
-        _logger.info("✅ Final HyperPay Request Values: %s", request_values)
-
-        try:
-            response_content = self.provider_id._hyperpay_make_request(request_values)
-        except Exception as e:
-            _logger.error("🚨 HyperPay API Error: %s", str(e))
-            raise ValidationError(_("Payment processing failed. Please contact support."))
-
-        # معالجة الرد
-        if not response_content.get('id'):
-            _logger.error("❌ Invalid HyperPay Response: %s", response_content)
-            raise ValidationError(_("Invalid response from payment gateway."))
-
-        response_content.update({
-            'action_url': '/payment/hyperpay',
-            'checkout_id': response_content['id'],
-            'merchantTransactionId': self.reference,
-            'formatted_amount': format_amount(self.env, self.amount, self.currency_id),
-            'paymentMethodCode': payment_method_code,
-            'payment_url': f"https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['id']}"
-        })
-
+        response_content['action_url'] = '/payment/hyperpay'
+        response_content['checkout_id'] = response_content.get('id')
+        response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
+        response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
+        response_content['paymentMethodCode'] = payment_method_code
+        if hyperpay_provider.state == 'enabled':
+            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+        else:
+            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+        response_content['payment_url'] = payment_url
         return response_content
 
     def _get_tx_from_notification_data(self, provider_code, data):
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
             return tx
-            
         payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + data.get('resourcePath')
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
-        
-        try:
-            notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
-        except Exception as e:
-            _logger.error("🚨 HyperPay Status Check Failed: %s", str(e))
-            raise ValidationError(_("Could not verify payment status. Please contact support."))
-
-        reference = notification_data.get('merchantTransactionId')
+        notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
+        reference = notification_data.get('merchantTransactionId', False)
         if not reference:
-            _logger.error("❌ HyperPay Missing Reference in: %s", notification_data)
             raise ValidationError(_("HyperPay: No reference found."))
-
         tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
         if not tx:
-            _logger.error("❌ HyperPay Transaction Not Found: %s", reference)
             raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
-            
         tx._handle_hyperpay_payment_status(notification_data)
         return tx
 
     def _handle_hyperpay_payment_status(self, notification_data):
+        tx_status_set = False
+        status = notification_data.get('result', False)
         if 'id' in notification_data:
-            self.provider_reference = notification_data['id']
+            self.provider_reference = notification_data.get('id', False)
 
-        status = notification_data.get('result', {})
-        status_code = status.get('code', '')
-        description = status.get('description', 'No description')
+        if status and 'code' in status:
+            status_code = status.get('code')
+            if not tx_status_set:
+                for reg_exp in hyperpay.PAYMENT_STATUS_CODES_REGEX['SUCCESS']:
+                    if re.search(reg_exp, status_code):
+                        self._set_done(state_message=status.get('description', "Authorised"))
+                        tx_status_set = True
+                        break
 
-        if not status_code:
-            _logger.error("❌ HyperPay Missing Status Code: %s", notification_data)
-            self._set_error("HyperPay: " + _("Invalid payment status."))
-            return
+            if not tx_status_set:
+                for reg_exp in hyperpay.PAYMENT_STATUS_CODES_REGEX['SUCCESS_REVIEW']:
+                    if re.search(reg_exp, status_code):
+                        self._set_pending(state_message=status.get('description'))
+                        tx_status_set = True
+                        break
 
-        # معالجة حالات الدفع المختلفة
-        for state, regex_list in hyperpay.PAYMENT_STATUS_CODES_REGEX.items():
-            for regex in regex_list:
-                if re.search(regex, status_code):
-                    if state == 'SUCCESS':
-                        self._set_done(state_message=description)
-                    elif state == 'SUCCESS_REVIEW':
-                        self._set_pending(state_message=description)
-                    else:
-                        self._set_error(state_message=description)
-                    return
+            if not tx_status_set:
+                for reg_exp in hyperpay.PAYMENT_STATUS_CODES_REGEX['PENDING']:
+                    if re.search(reg_exp, status_code):
+                        self._set_error(state_message=status.get('description'))
+                        tx_status_set = True
+                        break
 
-        _logger.warning("⚠️ Unrecognized HyperPay status %s: %s", status_code, description)
-        self._set_error("HyperPay: " + _("Unknown payment status."))
+            if not tx_status_set:
+                for reg_exp in hyperpay.PAYMENT_STATUS_CODES_REGEX['WAITING']:
+                    if re.search(reg_exp, status_code):
+                        self._set_error(state_message=status.get('description'))
+                        tx_status_set = True
+                        break
+
+            if not tx_status_set:
+                for reg_exp in hyperpay.PAYMENT_STATUS_CODES_REGEX['REJECTED']:
+                    if re.search(reg_exp, status_code):
+                        self._set_error(state_message=status.get('description'))
+                        tx_status_set = True
+                        break
+
+            if not tx_status_set:
+                _logger.warning("Received unrecognized payment state %s for "
+                                "transaction with reference %s\nDetailed Message:%s", status_code, self.reference,
+                                status.get('description'))
+                self._set_error("HyperPay: " + _("Invalid payment status."))
