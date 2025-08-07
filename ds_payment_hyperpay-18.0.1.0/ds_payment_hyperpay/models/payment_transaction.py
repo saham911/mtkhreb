@@ -75,8 +75,11 @@ class PaymentTransaction(models.Model):
             'billing.state': state,
             'billing.country': country,
             'billing.postcode': postcode,
-            'customParameters[SHOPPER_resultUrl]': 'https://www.artcontracting.com/payment/hyperpay/return',
-
+            'customParameters[SHOPPER_resultUrl]': (
+                'https://www.artcontracting.com/payment/hyperpay/return_mada'
+                if payment_method_code == 'mada'
+                else 'https://www.artcontracting.com/payment/hyperpay/return'
+            ),
         }
 
         _logger.info("🔎 HyperPay Request Data: %s", request_values)
