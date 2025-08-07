@@ -48,54 +48,36 @@ class PaymentTransaction(models.Model):
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-        # بيانات وهمية للاختبار
-        given_name = "abdulrhman"
-        surname = "abdulrhman"
-        email = "a.almeshal@hotmail.com"
-        city = "Riyadh"
-        state = "RUH"
-        postcode = "133335"
-        country = "SA"
-        street = "Al Uroubah Road"
-
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
-
             'testMode': 'EXTERNAL',
             'customParameters[3DS2_enrolled]': 'true',
-            'customer.email': email,
-            'customer.givenName': given_name,
-            'customer.surname': surname,
-            'billing.street1': street,
-            'billing.city': city,
-            'billing.state': state,
-            'billing.country': country,
-            'billing.postcode': postcode,
-            'customParameters[SHOPPER_resultUrl]': (
-                'https://www.artcontracting.com/payment/hyperpay/return_mada'
-                if payment_method_code == 'mada'
-                else 'https://www.artcontracting.com/payment/hyperpay/return'
-            ),
+
+            'customer.email': 'test@example.com',
+            'customer.givenName': 'TestFirst',
+            'customer.surname': 'TestLast',
+
+           'billing.street1': 'King Fahad Road',
+           'billing.city': 'Riyadh',
+           'billing.state': 'RUH',
+           'billing.country': 'SA',
+           'billing.postcode': '12345',
         }
-
-        _logger.info("🔎 HyperPay Request Data: %s", request_values)
-
         response_content = self.provider_id._hyperpay_make_request(request_values)
+
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
-
         if hyperpay_provider.state == 'enabled':
             payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         else:
             payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
-
         response_content['payment_url'] = payment_url
         return response_content
 
@@ -159,6 +141,7 @@ class PaymentTransaction(models.Model):
                         break
 
             if not tx_status_set:
-                _logger.warning("Received unrecognized payment state %s for transaction with reference %s\nDetailed Message:%s",
-                                status_code, self.reference, status.get('description'))
+                _logger.warning("Received unrecognized payment state %s for "
+                                "transaction with reference %s\nDetailed Message:%s", status_code, self.reference,
+                                status.get('description'))
                 self._set_error("HyperPay: " + _("Invalid payment status."))
