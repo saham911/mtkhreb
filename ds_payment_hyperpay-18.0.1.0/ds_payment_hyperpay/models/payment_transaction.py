@@ -29,14 +29,6 @@ class PaymentTransaction(models.Model):
             prefix = payment_utils.singularize_reference_prefix()
         return super()._compute_reference(provider_code, prefix=prefix, separator=separator, **kwargs)
 
-    def _get_specific_rendering_values(self, processing_values):
-        res = super()._get_specific_rendering_values(processing_values)
-        if self.provider_code != 'hyperpay':
-            return res
-        if self.currency_id.id not in self.payment_method_id.supported_currency_ids.ids:
-            raise odoo.exceptions.UserError("This currency is not supported with selected payment method.")
-        return self.hyperpay_execute_payment()
-
     def hyperpay_execute_payment(self):
         hyperpay_provider = self.provider_id
         payment_method_code = self.payment_method_id.code
@@ -48,13 +40,45 @@ class PaymentTransaction(models.Model):
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
+        # Prepare customer details
+        partner = self.partner_id
+        # Extract first name and last name
+        name_parts = partner.name.split()
+        given_name = name_parts[0] if name_parts else 'Customer'
+        surname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else given_name
+
+        # Prepare address details
+        street = partner.street or ''
+        city = partner.city or ''
+        state = partner.state_id.name or partner.state or ''
+        country = partner.country_id.code or ''
+        zip_code = partner.zip or ''
+
+        # Build base request values
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
+            # Add mandatory customer parameters
+            'customer.email': partner.email or '',
+            'billing.street1': street,
+            'billing.city': city,
+            'billing.state': state,
+            'billing.country': country,
+            'billing.postcode': zip_code,
+            'customer.givenName': given_name,
+            'customer.surname': surname,
         }
+
+        # Add test parameters for non-live environments
+        if hyperpay_provider.state != 'enabled':  # Test environment
+            request_values.update({
+                'testMode': 'EXTERNAL',
+                'customParameters[3DS2_enrolled]': 'true',
+            })
+
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
         response_content['action_url'] = '/payment/hyperpay'
