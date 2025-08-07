@@ -63,20 +63,28 @@ class PaymentTransaction(models.Model):
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
-            
+
+            # Test parameters
             'testMode': 'EXTERNAL',
             'customParameters[3DS2_enrolled]': 'true',
-            'customer.email': partner.email or 'test@example.com',
-            'customer.givenName': given_name,
-            'customer.surname': surname,
-            'billing.street1': partner.street or 'Default Street',
-            'billing.city': partner.city or 'Riyadh',
-            'billing.state': partner.state_id.code if partner.state_id else '01',
+
+            # Fixed test values
+            'customer.email': 'a.almeshal@hotmail.com',
+            'customer.givenName': 'abdulrhman',
+            'customer.surname': 'abdulrhman',
+            'billing.street1': 'Test Street',
+            'billing.city': 'Riyadh',
+            'billing.state': '01',  # RUH can be used if required, but '01' is safer for ISO standards
             'billing.country': 'SA',
-            'billing.postcode': partner.zip or '13335',
-             
+            'billing.postcode': '133335',
         }
+
+        # Logging for debugging
+        _logger.info("🔁 HyperPay Request Payload for transaction [%s]:\n%s",
+                     self.reference, request_values)
+
         response_content = self.provider_id._hyperpay_make_request(request_values)
+
 
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
