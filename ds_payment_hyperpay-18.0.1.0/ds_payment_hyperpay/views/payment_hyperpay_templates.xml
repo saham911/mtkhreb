@@ -27,7 +27,7 @@
                 div.wpwl-wrapper, div.wpwl-label, div.wpwl-sup-wrapper { width: 100% }
                 div.wpwl-group-expiry, div.wpwl-group-brand { width: 30%; float:left }
                 div.wpwl-group-cvv { width: 68%; float:left; margin-left:2% }
-                div.wpwl-group-cardHolder, div.wpwl-sup-wrapper-street1 { clear:both }
+                div.wpwl-group-cardHolder, div.wpwl-sup-wrapper-street1, div.wpwl-group-expiry { clear:both }
                 div.wpwl-sup-wrapper-street1 { padding-top: 1px }
                 div.wpwl-wrapper-brand { width: auto }
                 div.wpwl-sup-wrapper-state, div.wpwl-sup-wrapper-city { width:32%;float:left;margin-right:2% }
@@ -42,54 +42,50 @@
                 div.wpwl-wrapper > .wpwl-icon {top:.25em;}
                 button.wpwl-button-pay {border-radius: 0.4rem;}
             </style>
-            
-            <!-- تم إضافة هذا الكود هنا -->
-            <script type="text/javascript">
-                var wpwlOptions = {
-                    paymentTarget: "_top",  // تمت إضافة هذه الخاصية
-                    style: "plain",
-                    showCVVHint: true,
-                    maskCvv: true,
-                    brandDetection: true,
-                    locale: "en",
-                    onReady: function(){
-                        $(".wpwl-group-cardNumber").after($(".wpwl-group-brand").detach());
-                        $(".wpwl-group-cvv").after( $(".wpwl-group-cardHolder").detach());
-                        <t t-if="provider == 'hyperpay'">
-                            var visa = $(".wpwl-brand:first").clone().removeAttr("class").attr("class", "wpwl-brand-card wpwl-brand-custom wpwl-brand-VISA");
-                            var master = $(visa).clone().removeClass("wpwl-brand-VISA").addClass("wpwl-brand-MASTER");
-                            $(".wpwl-brand:first").after( $(master)).after( $(visa));
-                        </t>
-                        <t t-if="provider == 'mada'">
-                            var mada = $(".wpwl-brand:first").clone().removeAttr("class").attr("class", "wpwl-brand-card wpwl-brand-custom wpwl-brand-MADA");
-                            $(".wpwl-brand:first").after($(mada));
-                        </t>
-                        var imageUrl = "https://eu-test.oppwa.com/v1/static/" + wpwl.cacheVersion + "/img/brand.png";
-                        $(".wpwl-brand-custom").css("background-image", "url(" + imageUrl + ")");
-                        $('.wpwl-form-card').find('.wpwl-button-pay').on('click', function(e){
-                          validateHolder(e);
-                         });
-                    },
-                    onChangeBrand: function(e){
-                        $(".wpwl-brand-custom").css("opacity", "0.3");
-                        $(".wpwl-brand-" + e).css("opacity", "1");
-                    },
-                    onBeforeSubmitCard: function(e){
-                        return validateHolder(e);
-                    }
-                }
-                function validateHolder(e){
-                    var holder = $('.wpwl-control-cardHolder').val();
-                    if (holder.trim().length &lt; 2){
-                        $('.wpwl-control-cardHolder').addClass('wpwl-has-error').after('&lt;div class="wpwl-hint wpwl-hint-cardHolderError">Invalid card holder&lt;/div>');
-                        return false;
-                    }
-                    return true;
-                }
-            </script>
-            
             <script src="/web/static/lib/jquery/jquery.js" type="text/javascript"/>
             <script t-att-src="payment_url"></script>
+            <script type="text/javascript">
+                var wpwlOptions = {
+                  style: "plain",
+                  showCVVHint: true,
+                  maskCvv: true,
+                  brandDetection: true,
+                  locale: "en",
+                onReady: function(){
+                    $(".wpwl-group-cardNumber").after($(".wpwl-group-brand").detach());
+                    $(".wpwl-group-cvv").after( $(".wpwl-group-cardHolder").detach());
+                    <t t-if="provider == 'hyperpay'">
+                        var visa = $(".wpwl-brand:first").clone().removeAttr("class").attr("class", "wpwl-brand-card wpwl-brand-custom wpwl-brand-VISA");
+                        var master = $(visa).clone().removeClass("wpwl-brand-VISA").addClass("wpwl-brand-MASTER");
+                        $(".wpwl-brand:first").after( $(master)).after( $(visa));
+                    </t>
+                    <t t-if="provider == 'mada'">
+                        var mada = $(".wpwl-brand:first").clone().removeAttr("class").attr("class", "wpwl-brand-card wpwl-brand-custom wpwl-brand-MADA");
+                        $(".wpwl-brand:first").after($(mada));
+                    </t>
+                    var imageUrl = "https://eu-test.oppwa.com/v1/static/" + wpwl.cacheVersion + "/img/brand.png";
+                    $(".wpwl-brand-custom").css("background-image", "url(" + imageUrl + ")");
+                    $('.wpwl-form-card').find('.wpwl-button-pay').on('click', function(e){
+                      validateHolder(e);
+                     });
+                  },
+                  onChangeBrand: function(e){
+                    $(".wpwl-brand-custom").css("opacity", "0.3");
+                    $(".wpwl-brand-" + e).css("opacity", "1");
+                  },
+                  onBeforeSubmitCard: function(e){
+                    return validateHolder(e);
+                  }
+                }
+                function validateHolder(e){
+                  var holder = $('.wpwl-control-cardHolder').val();
+                  if (holder.trim().length &lt; 2){
+                    $('.wpwl-control-cardHolder').addClass('wpwl-has-error').after('&lt;div class="wpwl-hint wpwl-hint-cardHolderError">Invalid card holder&lt;/div>');
+                    return false;
+                  }
+                  return true;
+                }
+            </script>
         </t>
         <t t-call="website.layout">
             <div id="wrap">
@@ -118,4 +114,5 @@
             </div>
         </t>
     </template>
+
 </odoo>
