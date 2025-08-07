@@ -41,12 +41,36 @@ class PaymentTransaction(models.Model):
         hyperpay_provider = self.provider_id
         payment_method_code = self.payment_method_id.code
 
+        # 1. جلب معرف التاجر من الإعدادات
         if payment_method_code == 'mada':
-            entity_id = hyperpay_provider.hyperpay_merchant_id_mada
+            entity_id = hyperpay_provider.merchant_id_mada  # تغيير اسم الحقل ليتطابق مع الإعدادات
         else:
-            entity_id = hyperpay_provider.hyperpay_merchant_id
+            entity_id = hyperpay_provider.merchant_id  # تغيير اسم الحقل ليتطابق مع الإعدادات
+    
+        # 2. التحقق من وجود المعرف
         if not entity_id:
-            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+            error_msg = _("""
+            لم يتم تهيئة إعدادات الدفع بشكل صحيح.
+            - للبطاقات الدولية: %s
+            - لبطاقات مدى: %s
+            """) % (
+                hyperpay_provider.merchant_id,
+                hyperpay_provider.merchant_id_mada
+            )
+            _logger.error(error_msg)
+            raise ValidationError(error_msg)
+
+        # 3. تسجيل البيانات للإفادة
+        _logger.info("""
+        إعدادات هايبر باي:
+        - نوع البطاقة: %s
+        - معرف التاجر: %s
+        - وضع التشغيل: %s
+        """, 
+        payment_method_code, 
+        entity_id,
+        'Test Mode' if hyperpay_provider.state == 'test' else 'Production'
+        )
 
         # معالجة البيانات المطلوبة بدقة
         partner = self.partner_id
