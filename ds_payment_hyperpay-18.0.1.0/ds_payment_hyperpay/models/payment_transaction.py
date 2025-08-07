@@ -48,12 +48,33 @@ class PaymentTransaction(models.Model):
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
+        # معالجة الاسم الكامل للحصول على الاسم الأول واللقب
+        partner = self.partner_id
+        if partner.name and len(partner.name.split()) > 1:
+             given_name = partner.name.split(' ')[0]
+             surname = partner.name.split(' ')[-1]
+        else:
+             given_name = partner.name or 'FirstName'
+             surname = given_name  # تكرار الاسم لتفادي المشاكل
+        
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
+            
+            'testMode': 'EXTERNAL',
+            'customParameters[3DS2_enrolled]': 'true',
+            'customer.email': partner.email or 'test@example.com',
+            'customer.givenName': given_name,
+            'customer.surname': surname,
+            'billing.street1': partner.street or 'Default Street',
+            'billing.city': partner.city or 'Riyadh',
+            'billing.state': partner.state_id.code if partner.state_id else '01',
+            'billing.country': 'SA',
+            'billing.postcode': partner.zip or '13335',
+             
         }
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
