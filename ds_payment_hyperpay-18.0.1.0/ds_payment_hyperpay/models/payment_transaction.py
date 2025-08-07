@@ -48,18 +48,31 @@ class PaymentTransaction(models.Model):
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-        # معالجة الاسم الكامل للحصول على الاسم الأول واللقب
+        # معالجة البيانات المطلوبة بدقة
         partner = self.partner_id
+        
+        # تحسين معالجة الاسم
         name_parts = (partner.name or 'Test User').strip().split()
         given_name = name_parts[0] if name_parts else 'Test'
         surname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else 'User'
         
-        # معالجة العنوان
-        street = partner.street or 'Al arid, Abubaker'
-        city = partner.city or 'Riyadh'
-        zip_code = partner.zip or '11322'  # الرمز البريدي للبطاقة الاختبارية
+        # معالجة العنوان بدقة
+        street_parts = []
+        if partner.street:
+            street_parts.append(partner.street.strip())
+        if partner.street2:
+            street_parts.append(partner.street2.strip())
+        street = ', '.join(street_parts) or 'Al arid, Abubaker'
         
-        # بيانات الطلب الأساسية
+        # تنظيف بيانات الولاية
+        state_code = 'RUH'  # نستخدم RUH كقيمة افتراضية للرياض
+        if partner.state_id and partner.state_id.code:
+            state_code = re.sub(r'\s+', '', partner.state_id.code.upper().strip())[:10]
+        
+        # تنظيف الرمز البريدي
+        zip_code = re.sub(r'[^0-9]', '', partner.zip or '11322')[:20] or '11322'
+        
+        # بيانات الطلب المعدلة
         request_values = {
             'entityId': entity_id,
             'amount': "{:.2f}".format(self.amount),
@@ -71,32 +84,30 @@ class PaymentTransaction(models.Model):
             'testMode': 'EXTERNAL',
             'customParameters[3DS2_enrolled]': 'true',
             
-            # معلومات العميل (يمكن استخدام بيانات الاختبار الثابتة)
-            'customer.email': partner.email or 'test@example.com',
-            'customer.givenName': given_name,
-            'customer.surname': surname,
+            # معلومات العميل
+            'customer.email': (partner.email or 'test@example.com').strip(),
+            'customer.givenName': given_name[:50],
+            'customer.surname': surname[:50],
             
-            # معلومات الفاتورة (يجب أن تطابق البطاقة الاختبارية)
-            'billing.street1': street,
-            'billing.city': city,
-            'billing.state': 'RUH',  # كود المنطقة للرياض
+            # معلومات الفاتورة الدقيقة
+            'billing.street1': street[:255],
+            'billing.city': (partner.city or 'Riyadh').strip()[:50],
+            'billing.state': state_code,
             'billing.country': 'SA',
             'billing.postcode': zip_code,
         }
 
-        # تسجيل البيانات المرسلة للتحقق
-        _logger.info("🔁 HyperPay Request Payload for transaction [%s]: %s", 
-                    self.reference, request_values)
+        _logger.info("✅ Final HyperPay Request Values: %s", request_values)
 
         try:
             response_content = self.provider_id._hyperpay_make_request(request_values)
         except Exception as e:
-            _logger.error("HyperPay API Error: %s", str(e))
-            raise ValidationError(_("Payment processing failed. Please try again."))
+            _logger.error("🚨 HyperPay API Error: %s", str(e))
+            raise ValidationError(_("Payment processing failed. Please contact support."))
 
         # معالجة الرد
         if not response_content.get('id'):
-            _logger.error("HyperPay Invalid Response: %s", response_content)
+            _logger.error("❌ Invalid HyperPay Response: %s", response_content)
             raise ValidationError(_("Invalid response from payment gateway."))
 
         response_content.update({
@@ -105,7 +116,7 @@ class PaymentTransaction(models.Model):
             'merchantTransactionId': self.reference,
             'formatted_amount': format_amount(self.env, self.amount, self.currency_id),
             'paymentMethodCode': payment_method_code,
-            'payment_url': "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['id']
+            'payment_url': f"https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['id']}"
         })
 
         return response_content
@@ -121,17 +132,17 @@ class PaymentTransaction(models.Model):
         try:
             notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
         except Exception as e:
-            _logger.error("HyperPay Status Check Failed: %s", str(e))
+            _logger.error("🚨 HyperPay Status Check Failed: %s", str(e))
             raise ValidationError(_("Could not verify payment status. Please contact support."))
 
         reference = notification_data.get('merchantTransactionId')
         if not reference:
-            _logger.error("HyperPay Missing Reference in: %s", notification_data)
+            _logger.error("❌ HyperPay Missing Reference in: %s", notification_data)
             raise ValidationError(_("HyperPay: No reference found."))
 
         tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
         if not tx:
-            _logger.error("HyperPay Transaction Not Found: %s", reference)
+            _logger.error("❌ HyperPay Transaction Not Found: %s", reference)
             raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
             
         tx._handle_hyperpay_payment_status(notification_data)
@@ -146,7 +157,7 @@ class PaymentTransaction(models.Model):
         description = status.get('description', 'No description')
 
         if not status_code:
-            _logger.error("HyperPay Missing Status Code: %s", notification_data)
+            _logger.error("❌ HyperPay Missing Status Code: %s", notification_data)
             self._set_error("HyperPay: " + _("Invalid payment status."))
             return
 
@@ -162,5 +173,5 @@ class PaymentTransaction(models.Model):
                         self._set_error(state_message=description)
                     return
 
-        _logger.warning("Unrecognized HyperPay status %s: %s", status_code, description)
+        _logger.warning("⚠️ Unrecognized HyperPay status %s: %s", status_code, description)
         self._set_error("HyperPay: " + _("Unknown payment status."))
