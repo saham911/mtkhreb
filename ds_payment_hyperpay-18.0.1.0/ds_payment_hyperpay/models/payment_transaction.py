@@ -41,33 +41,71 @@ class PaymentTransaction(models.Model):
         hyperpay_provider = self.provider_id
         payment_method_code = self.payment_method_id.code
 
-        if payment_method_code == 'mada':
-            entity_id = hyperpay_provider.hyperpay_merchant_id_mada
-        else:
-            entity_id = hyperpay_provider.hyperpay_merchant_id
+        # اختر الـ entityId حسب MADA أو Visa/Master
+        entity_id = (hyperpay_provider.hyperpay_merchant_id_mada
+                 if payment_method_code == 'mada'
+                 else hyperpay_provider.hyperpay_merchant_id)
         if not entity_id:
-            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+           raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
+        # --- بيانات العميل من شريك Odoo ---
+        partner = self.partner_id
+        email = (partner.email or '').strip()
+        full_name = (partner.name or '').strip()
+        # تقسيم الاسم إلى اسم أول واسم عائلة بشكل بسيط
+        given_name = full_name.split(' ', 1)[0] if full_name else ''
+        surname = full_name.split(' ', 1)[1] if ' ' in full_name else ''
+
+        street1 = (partner.street or '').strip()
+        city = (partner.city or '').strip()
+        state = (partner.state_id.code or partner.state_id.name or '').strip() if partner.state_id else ''
+        country = (partner.country_id.code or '').strip()  # ISO Alpha-2 متوفر في Odoo
+        postcode = (partner.zip or '').strip()
+
+        # --- القيم الأساسية للطلب ---
         request_values = {
-            'entityId': '%s' % entity_id,
-            'amount': "{:.2f}".format(self.amount),
+            'entityId': str(entity_id),
+            'amount': f"{self.amount:.2f}",
             'currency': self.currency_id.name,
             'paymentType': 'DB',
+        # unique ID in your DB -> نستخدم مرجع المعاملة القياسي من Odoo
             'merchantTransactionId': self.reference,
-        }
+
+        # --- بيانات العميل المطلوبة من HyperPay ---
+            'customer.email': email,
+            'customer.givenName': given_name,
+            'customer.surname': surname,
+
+        # --- عناوين الفوترة ---
+            'billing.street1': street1,
+            'billing.city': city,
+            'billing.state': state,
+            'billing.country': country,  # يجب أن يكون Alpha-2
+            'billing.postcode': postcode,
+    }
+
+    # فقط على خادم الاختبار: testMode + 3DS enrolled
+        if hyperpay_provider.state != 'enabled':
+            request_values['testMode'] = 'EXTERNAL'
+            request_values['customParameters[3DS2_enrolled]'] = 'true'
+
+    # تنفيذ الطلب لإنشاء checkout_id
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
+    # تجهيز قيم واجهة الدفع
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
+
         if hyperpay_provider.state == 'enabled':
-            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+           payment_url = f"https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
         else:
-            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+           payment_url = f"https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId={response_content['checkout_id']}"
         response_content['payment_url'] = payment_url
         return response_content
+
 
     def _get_tx_from_notification_data(self, provider_code, data):
         tx = super()._get_tx_from_notification_data(provider_code, data)
