@@ -50,15 +50,28 @@ class PaymentProvider(models.Model):
         try:
             url = self.get_hyperpay_urls()['hyperpay_form_url']
             opener = build_opener(HTTPHandler)
-            request = Request(url, data=urlencode(data).encode('utf-8'))
-            request.add_header('Authorization', 'Bearer %s' % self.hyperpay_secret_key)
+            payload = urlencode(data).encode('utf-8')
+            request = Request(url, data=payload)
+            request.add_header('Authorization', f'Bearer {self.hyperpay_secret_key}')
+            request.add_header('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8')
             request.get_method = lambda: 'POST'
-            response = opener.open(request)
-            return json.loads(response.read())
+
+        # اطبع البودي اللي بيروح لـ HyperPay
+            _logger.info("HyperPay >> URL: %s", url)
+            _logger.info("HyperPay >> Payload (raw): %s", payload.decode('utf-8'))
+
+            response = opener.open(request, timeout=30)
+            raw = response.read()
+            _logger.info("HyperPay << Response: %s", raw.decode('utf-8'))
+            return json.loads(raw)
         except HTTPError as e:
-            return json.loads(e.read())
+            body = e.read().decode('utf-8')
+            _logger.error("HyperPay !! HTTPError %s: %s", e.code, body)
+            return json.loads(body)
         except URLError as e:
+            _logger.error("HyperPay !! URLError: %s", e.reason)
             return e.reason
+
 
     def _hyperpay_get_payment_status(self, url, provider_code):
         merchant_id = self.hyperpay_merchant_id_mada if provider_code == 'mada' else self.hyperpay_merchant_id
