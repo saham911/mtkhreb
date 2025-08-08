@@ -80,7 +80,7 @@ class PaymentTransaction(models.Model):
             # Use state code if present, else state name
             'billing.state': (partner.state_id and (partner.state_id.code or partner.state_id.name)) or '',
             # ISO Alpha-2 code (e.g., SA, AE, PK)
-            'billing.country': (partner.country_id and partner.country_id.code) or '',
+            'billing.country': 'SA',# (partner.country_id and partner.country_id.code) or '',
             'billing.postcode': partner.zip or '',
         }
 
