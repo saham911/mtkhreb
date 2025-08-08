@@ -48,13 +48,49 @@ class PaymentTransaction(models.Model):
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
+        # ===== Build customer/billing =====
+        partner = self.partner_id  # payer
+
+        # Try to split name into given/surname if you don't store first/last separately
+        def split_name(name):
+            name = (name or "").strip()
+            if not name:
+                return "", ""
+            parts = name.split()
+            return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
+
+        # If you have custom firstname/lastname fields, prefer them; else split
+        given, surname = split_name(partner.name)
+        given = getattr(partner, 'firstname', '') or given
+        surname = getattr(partner, 'lastname', '') or surname
+
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
+
+            # >>> HyperPay-required customer/billing fields <<<
+            'customer.email': partner.email or '',
+            'customer.givenName': given,
+            'customer.surname': surname,
+            'billing.street1': partner.street or '',
+            'billing.city': partner.city or '',
+            # Use state code if present, else state name
+            'billing.state': (partner.state_id and (partner.state_id.code or partner.state_id.name)) or '',
+            # ISO Alpha-2 code (e.g., SA, AE, PK)
+            'billing.country': (partner.country_id and partner.country_id.code) or '',
+            'billing.postcode': partner.zip or '',
         }
+
+        # >>> Test-only flags <<<
+        # Your code already switches the widget URL on provider.state.
+        # Use the same check to add HyperPay test parameters.
+        if hyperpay_provider.state != 'enabled':  # i.e., 'test'
+            request_values['testMode'] = 'EXTERNAL'
+            request_values['customParameters[3DS2_enrolled]'] = 'true'
+
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
         response_content['action_url'] = '/payment/hyperpay'
@@ -63,11 +99,44 @@ class PaymentTransaction(models.Model):
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
         if hyperpay_provider.state == 'enabled':
-            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content[
+                'checkout_id']
         else:
-            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content[
+                'checkout_id']
         response_content['payment_url'] = payment_url
         return response_content
+    # def hyperpay_execute_payment(self):
+    #     hyperpay_provider = self.provider_id
+    #     payment_method_code = self.payment_method_id.code
+    #
+    #     if payment_method_code == 'mada':
+    #         entity_id = hyperpay_provider.hyperpay_merchant_id_mada
+    #     else:
+    #         entity_id = hyperpay_provider.hyperpay_merchant_id
+    #     if not entity_id:
+    #         raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+    #
+    #     request_values = {
+    #         'entityId': '%s' % entity_id,
+    #         'amount': "{:.2f}".format(self.amount),
+    #         'currency': self.currency_id.name,
+    #         'paymentType': 'DB',
+    #         'merchantTransactionId': self.reference,
+    #     }
+    #     response_content = self.provider_id._hyperpay_make_request(request_values)
+    #
+    #     response_content['action_url'] = '/payment/hyperpay'
+    #     response_content['checkout_id'] = response_content.get('id')
+    #     response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
+    #     response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
+    #     response_content['paymentMethodCode'] = payment_method_code
+    #     if hyperpay_provider.state == 'enabled':
+    #         payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+    #     else:
+    #         payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+    #     response_content['payment_url'] = payment_url
+    #     return response_content
 
     def _get_tx_from_notification_data(self, provider_code, data):
         tx = super()._get_tx_from_notification_data(provider_code, data)
