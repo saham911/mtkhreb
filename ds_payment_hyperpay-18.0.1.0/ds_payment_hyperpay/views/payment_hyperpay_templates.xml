@@ -50,6 +50,7 @@
                   showCVVHint: true,
                   maskCvv: true,
                   brandDetection: true,
+                  paymentTarget: "_top",
                   locale: "en",
                 onReady: function(){
                     $(".wpwl-group-cardNumber").after($(".wpwl-group-brand").detach());
