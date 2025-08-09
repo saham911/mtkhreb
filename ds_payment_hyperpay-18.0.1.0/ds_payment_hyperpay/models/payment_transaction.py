@@ -39,12 +39,11 @@ class PaymentTransaction(models.Model):
 
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """Build HyperPay checkout request with strict filtering.
-        - نرسل أقل قدر لازم من الحقول وبصيغة صحيحة
-        - نحط قيم افتراضية آمنة لو ناقصة في Odoo
-        - لا نرسل billing.state لبلدان لا تتطلبه (مثل SA)
-        - ننظف merchantTransactionId إلى أبجدي-رقمي وبحد أقصى 30
-        - نحاول إضافة merchantCustomerId / merchantInvoiceId، ولو فشل الإنشاء نعيد المحاولة بدونهم
+        """Minimal, sanitized checkout payload:
+        - Only required fields (+ defaults)
+        - No billing.state for SA
+        - merchantTransactionId sanitized (alphanumeric, <=30)
+        - If extra IDs cause issues, we fallback automatically.
         """
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
@@ -53,38 +52,32 @@ class PaymentTransaction(models.Model):
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % pm_code)
 
-        partner = self.partner_id  # payer
+        partner = self.partner_id
 
         # ---------- helpers ----------
         import re as _re
         def _clean(v): return (v or "").strip()
-
         def _ascii_safe(text):
             s = _clean(text)
             s = _re.sub(r'\s+', ' ', s)
             try:
-                from unidecode import unidecode  # optional
+                from unidecode import unidecode
                 s = unidecode(s)
             except Exception:
                 s = s.encode('ascii', 'ignore').decode()
             return _re.sub(r'[^A-Za-z0-9 .,\-/#]', '', s).strip()
-
         def _split_name(fullname):
             fullname = _clean(fullname)
             if not fullname: return "", ""
             parts = fullname.split()
             return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
-
         def _ensure_street_ok(street):
             s = _ascii_safe(street)
-            if len(s) < 5 or not _re.search(r'\d', s):
-                s = "King Fahd Road 123"
+            if len(s) < 5 or not _re.search(r'\d', s): s = "King Fahd Road 123"
             return s
-
         def _ensure_city_ok(city):
             c = _ascii_safe(city)
             return c if len(c) >= 2 else "Riyadh"
-
         def _ensure_postcode_ok(zipcode):
             z = _re.sub(r'\D', '', _clean(zipcode))
             return z if 4 <= len(z) <= 10 else "11322"
@@ -103,10 +96,8 @@ class PaymentTransaction(models.Model):
         street1  = _ensure_street_ok(getattr(partner, 'x_billing_street1', '') or partner.street)
         city     = _ensure_city_ok(getattr(partner, 'x_billing_city', '')    or partner.city)
         postcode = _ensure_postcode_ok(getattr(partner, 'x_billing_postcode', '') or partner.zip)
-
         country_code = (partner.country_id and (partner.country_id.code or '')) or ''
         country_code = (country_code or 'SA').upper()[:2]
-
         email_val = _clean(partner.email) or "no-reply@example.com"
 
         # ---------- sanitize merchantTransactionId ----------
@@ -114,7 +105,7 @@ class PaymentTransaction(models.Model):
         merchant_tx_id = re.sub(r'[^A-Za-z0-9]', '', raw_ref) or "TX"
         merchant_tx_id = merchant_tx_id[:30]
 
-        # merchantInvoiceId: SO ثم Invoice ثم fallback
+        # Optional IDs (we'll fallback if rejected)
         invoice_ref = None
         try:
             if getattr(self, 'sale_order_ids', False):
@@ -128,12 +119,10 @@ class PaymentTransaction(models.Model):
             except Exception:
                 invoice_ref = None
         merchant_invoice_id = re.sub(r'[^A-Za-z0-9]', '', (invoice_ref or merchant_tx_id))[:30]
-
         merchant_customer_id = str(partner.id)
-
         currency_code = (self.currency_id.name or "SAR").upper()[:3]
 
-        # ---------- base payload (الحد الأدنى) ----------
+        # ---------- base payload ----------
         base_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
@@ -150,41 +139,36 @@ class PaymentTransaction(models.Model):
             'billing.country': country_code,
             'billing.postcode': postcode,
         }
-        # لا نرسل billing.state
-
-        # معرّفات اختيارية (قد يرفضها بعض القنوات)
-        extra_ids = {
-            'merchantCustomerId': merchant_customer_id,
-            'merchantInvoiceId': merchant_invoice_id,
-        }
-
         # test flags
         if provider.state != 'enabled':
             base_values['testMode'] = 'EXTERNAL'
             base_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        # ---------- attempt #1: مع extra ids ----------
+        extra_ids = {
+            'merchantCustomerId': merchant_customer_id,
+            'merchantInvoiceId': merchant_invoice_id,
+        }
+
+        # Attempt #1 (with extra ids)
         request_values = dict(base_values, **extra_ids)
         _logger.info("HyperPay payload attempt#1: %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
         response_content = provider._hyperpay_make_request(request_values)
         _logger.info("HyperPay create-checkout response#1: %s", response_content)
-
         checkout_id = response_content.get('id')
+
+        # Fallback #2 (without extra ids)
         if not checkout_id:
-            # ---------- attempt #2: بدون extra ids ----------
-            request_values = dict(base_values)  # minimum only
+            request_values = dict(base_values)
             _logger.info("HyperPay payload attempt#2 (fallback, no extra ids): %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
             response_content = provider._hyperpay_make_request(request_values)
             _logger.info("HyperPay create-checkout response#2: %s", response_content)
             checkout_id = response_content.get('id')
 
-        # إن ما زال ما عندنا checkout_id، أظهر خطأ واضح
         if not checkout_id:
             desc = (response_content.get('result') or {}).get('description') or "Unknown error"
             code = (response_content.get('result') or {}).get('code') or "N/A"
             raise odoo.exceptions.UserError(_("HyperPay checkout creation failed: %s (%s)") % (desc, code))
 
-        # Prepare rendering values
         response_content.update({
             'action_url': '/payment/hyperpay',
             'checkout_id': checkout_id,
@@ -201,6 +185,7 @@ class PaymentTransaction(models.Model):
     # ==================  /HyperPay: execute payment  ================== #
 
     def _get_tx_from_notification_data(self, provider_code, data):
+        """Map HyperPay callback to our tx even if merchantTransactionId was sanitized."""
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
             return tx
@@ -216,12 +201,28 @@ class PaymentTransaction(models.Model):
             notification_data
         )
 
-        reference = notification_data.get('merchantTransactionId', False)
-        if not reference:
+        ref = notification_data.get('merchantTransactionId', False)
+        if not ref:
             raise ValidationError(_("HyperPay: No reference found."))
-        tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
+
+        # Try exact match first
+        tx = self.search([('reference', '=', ref), ('provider_code', '=', 'hyperpay')], limit=1)
+
+        # Fallback: try alternative sanitized/unsanitized variants
         if not tx:
-            raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
+            candidates = set()
+            candidates.add(ref)
+            candidates.add(re.sub(r'[^A-Za-z0-9]', '', ref))  # no punctuation
+            if ref.startswith('tx') and '-' not in ref and len(ref) > 2:
+                candidates.add('tx-' + ref[2:])                 # add dash after 'tx'
+            if '-' in ref:
+                candidates.add(ref.replace('-', ''))            # remove dash
+
+            tx = self.search([('reference', 'in', list(candidates)), ('provider_code', '=', 'hyperpay')], limit=1)
+
+        if not tx:
+            raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % ref)
+
         tx._handle_hyperpay_payment_status(notification_data)
         return tx
 
