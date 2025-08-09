@@ -39,11 +39,12 @@ class PaymentTransaction(models.Model):
 
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """Build a MINIMAL HyperPay request strictly to spec:
-        - Only required fields, sanitized
-        - Defaults applied when Odoo fields are missing
-        - Drop billing.state entirely
-        - Add test flags in test mode only
+        """Build a MINIMAL HyperPay request with strict filtering:
+        - Only required fields (sanitized to ASCII)
+        - Defaults when Odoo values are missing
+        - Remove billing.state for countries that don't need it (e.g., SA)
+        - Sanitize merchantTransactionId (alphanumeric, <=30)
+        - Send merchantCustomerId and merchantInvoiceId explicitly
         """
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
@@ -66,7 +67,6 @@ class PaymentTransaction(models.Model):
                 s = unidecode(s)
             except Exception:
                 s = s.encode('ascii', 'ignore').decode()
-            # keep simple safe charset
             return _re.sub(r'[^A-Za-z0-9 .,\-/#]', '', s).strip()
 
         def _split_name(fullname):
@@ -104,25 +104,55 @@ class PaymentTransaction(models.Model):
         city     = _ensure_city_ok(getattr(partner, 'x_billing_city', '')    or partner.city)
         postcode = _ensure_postcode_ok(getattr(partner, 'x_billing_postcode', '') or partner.zip)
 
-        # country alpha-2; default SA
         country_code = (partner.country_id and (partner.country_id.code or '')) or ''
         country_code = (country_code or 'SA').upper()[:2]
 
-        # email
         email_val = _clean(partner.email) or "no-reply@example.com"
 
-        # ---------- build strictly-minimal payload ----------
+        # ---------- sanitize merchantTransactionId ----------
+        raw_ref = self.reference or ""
+        merchant_tx_id = re.sub(r'[^A-Za-z0-9]', '', raw_ref) or "TX"
+        merchant_tx_id = merchant_tx_id[:30]
+
+        # merchantInvoiceId: try Sale Order then Invoice then fallback to tx id
+        invoice_ref = None
+        try:
+            if getattr(self, 'sale_order_ids', False):
+                invoice_ref = self.sale_order_ids[:1].name
+        except Exception:
+            invoice_ref = None
+        if not invoice_ref:
+            try:
+                if getattr(self, 'invoice_ids', False):
+                    invoice_ref = self.invoice_ids[:1].name
+            except Exception:
+                invoice_ref = None
+        merchant_invoice_id = re.sub(r'[^A-Za-z0-9]', '', (invoice_ref or merchant_tx_id))[:30]
+
+        # merchantCustomerId: Odoo partner id
+        merchant_customer_id = str(partner.id)
+
+        # also ensure currency is 3-letter upper
+        currency_code = (self.currency_id.name or "SAR").upper()[:3]
+
+        # ---------- build payload ----------
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
-            'currency': self.currency_id.name,
+            'currency': currency_code,
             'paymentType': 'DB',
-            'merchantTransactionId': self.reference,
 
+            # identifiers
+            'merchantTransactionId': merchant_tx_id,
+            'merchantCustomerId': merchant_customer_id,
+            'merchantInvoiceId': merchant_invoice_id,
+
+            # customer
             'customer.email': email_val,
             'customer.givenName': given,
             'customer.surname': surname,
 
+            # billing (minimal)
             'billing.street1': street1,
             'billing.city': city,
             'billing.country': country_code,
@@ -135,7 +165,10 @@ class PaymentTransaction(models.Model):
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        _logger.info("HyperPay request payload (minimal): %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
+        _logger.info(
+            "HyperPay request payload (minimal+ids): %s",
+            {k: v for k, v in request_values.items() if k not in ('entityId',)}
+        )
 
         # send
         response_content = provider._hyperpay_make_request(request_values)
