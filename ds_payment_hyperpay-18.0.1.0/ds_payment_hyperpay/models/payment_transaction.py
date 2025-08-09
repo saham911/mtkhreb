@@ -120,10 +120,13 @@ class PaymentTransaction(models.Model):
             'customer.surname': surname,
             'billing.street1': street,
             'billing.city': city,
-            'billing.state': state_value,
+            #'billing.state': state_value,
             'billing.country': country_code,  # ISO Alpha-2
             'billing.postcode': postcode,
         }
+        states_required = {'US', 'CA'}
+        if country_code in states_required and state_value:
+            payload['billing.state'] = state_value
         self._log('debug', "Built billing payload", billing_payload=payload, test_mode=test_mode)
         return payload
 
