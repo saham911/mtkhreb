@@ -39,9 +39,12 @@ class PaymentTransaction(models.Model):
 
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """Build HyperPay request from Odoo partner fields (standard or Studio),
-        sanitize values, enforce minimal address rules, set standingInstruction for MPGS,
-        and omit billing.state for SA."""
+        """Build a MINIMAL HyperPay request strictly to spec:
+        - Only required fields, sanitized
+        - Defaults applied when Odoo fields are missing
+        - Drop billing.state entirely
+        - Add test flags in test mode only
+        """
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
 
@@ -51,88 +54,64 @@ class PaymentTransaction(models.Model):
 
         partner = self.partner_id  # payer
 
-        # ---- helpers ----
+        # ---------- helpers ----------
         import re as _re
-        def _clean(v):
-            return (v or "").strip()
+        def _clean(v): return (v or "").strip()
 
         def _ascii_safe(text):
             s = _clean(text)
             s = _re.sub(r'\s+', ' ', s)
             try:
-                from unidecode import unidecode  # optional
+                from unidecode import unidecode
                 s = unidecode(s)
             except Exception:
                 s = s.encode('ascii', 'ignore').decode()
-            s = _re.sub(r'[^A-Za-z0-9 .,\-/#]', '', s)
-            return s.strip()
+            # keep simple safe charset
+            return _re.sub(r'[^A-Za-z0-9 .,\-/#]', '', s).strip()
 
         def _split_name(fullname):
             fullname = _clean(fullname)
-            if not fullname:
-                return "", ""
+            if not fullname: return "", ""
             parts = fullname.split()
             return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
 
         def _ensure_street_ok(street):
             s = _ascii_safe(street)
             if len(s) < 5 or not _re.search(r'\d', s):
-                s = "King Fahd Road 123"
+                s = "King Fahd Road 123"  # safe default
             return s
 
         def _ensure_city_ok(city):
             c = _ascii_safe(city)
-            if len(c) < 2:
-                c = "Riyadh"
-            return c
+            return c if len(c) >= 2 else "Riyadh"
 
         def _ensure_postcode_ok(zipcode):
             z = _re.sub(r'\D', '', _clean(zipcode))
-            if len(z) < 4 or len(z) > 10:
-                z = "11322"
-            return z
+            return z if 4 <= len(z) <= 10 else "11322"
 
-        # ---- Names ----
+        # ---------- names ----------
         given_raw   = getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', '')
         surname_raw = getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', '')
         if not given_raw or not surname_raw:
             s_given, s_surname = _split_name(partner.name or '')
             given_raw   = given_raw   or s_given
             surname_raw = surname_raw or s_surname
-        given   = _ascii_safe(given_raw)
-        surname = _ascii_safe(surname_raw)
+        given   = _ascii_safe(given_raw) or "Customer"
+        surname = _ascii_safe(surname_raw) or "Name"
 
-        # ---- Address ----
+        # ---------- address ----------
         street1  = _ensure_street_ok(getattr(partner, 'x_billing_street1', '') or partner.street)
         city     = _ensure_city_ok(getattr(partner, 'x_billing_city', '')    or partner.city)
         postcode = _ensure_postcode_ok(getattr(partner, 'x_billing_postcode', '') or partner.zip)
 
-        # country: ISO Alpha-2; default SA
+        # country alpha-2; default SA
         country_code = (partner.country_id and (partner.country_id.code or '')) or ''
         country_code = (country_code or 'SA').upper()[:2]
 
-        # state: لا نرسلها للسعودية
-        state_raw = getattr(partner, 'x_billing_state', '') or (
-            partner.state_id and (partner.state_id.code or partner.state_id.name)
-        ) or ''
-        state_val = _ascii_safe(state_raw)
-        COUNTRIES_REQUIRE_STATE = {'US', 'CA', 'AU', 'BR', 'IN', 'CN', 'JP'}
-        send_state = country_code in COUNTRIES_REQUIRE_STATE and bool(state_val)
+        # email
+        email_val = _clean(partner.email) or "no-reply@example.com"
 
-        # ---- Minimal validation ----
-        missing = []
-        email_val = _clean(partner.email)
-        if not email_val:   missing.append("Email")
-        if not given:       missing.append("Given Name")
-        if not surname:     missing.append("Surname")
-        if not street1:     missing.append("Street")
-        if not city:        missing.append("City")
-        if not postcode:    missing.append("Postcode")
-        if not country_code: missing.append("Country (alpha-2)")
-        if missing:
-            raise odoo.exceptions.UserError("Please complete customer fields before payment: " + ", ".join(missing))
-
-        # ---- Build request (HyperPay format) ----
+        # ---------- build strictly-minimal payload ----------
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
@@ -148,24 +127,17 @@ class PaymentTransaction(models.Model):
             'billing.city': city,
             'billing.country': country_code,
             'billing.postcode': postcode,
-
-            # MPGS standingInstruction to avoid INSTALLMENT default issues
-            'standingInstruction.type': 'UNSCHEDULED',
-            'standingInstruction.source': 'CIT',
         }
-        if send_state:
-            request_values['billing.state'] = state_val
+        # NOTE: intentionally NOT sending billing.state
 
-        # Test-only flags
-        if provider.state != 'enabled':  # test mode
+        # test flags
+        if provider.state != 'enabled':
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        _logger.info(
-            "HyperPay request payload (sanitized): %s",
-            {k: v for k, v in request_values.items() if k not in ('entityId',)}
-        )
+        _logger.info("HyperPay request payload (minimal): %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
 
+        # send
         response_content = provider._hyperpay_make_request(request_values)
 
         checkout_id = response_content.get('id')
