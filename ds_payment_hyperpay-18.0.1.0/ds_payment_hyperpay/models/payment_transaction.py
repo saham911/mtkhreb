@@ -54,6 +54,20 @@ class PaymentTransaction(models.Model):
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
+            'customer.email': self.partner_id.email or self.partner_id.parent_id.email or self.partner_id.commercial_partner_id.email,
+            'customer.givenName': self.partner_id.name or self.partner_id.parent_id.name or self.partner_id.commercial_partner_id.name,
+            'customer.surname': self.partner_id.name or self.partner_id.parent_id.name or self.partner_id.commercial_partner_id.name,
+            'billing.city': self.partner_id.city or self.partner_id.parent_id.city or self.partner_id.commercial_partner_id.city,
+            'billing.country': self.partner_id.country_id.code or self.partner_id.parent_id.country_id.code or self.partner_id.commercial_partner_id.country_id.code,
+            'billing.postcode': self.partner_id.zip or self.partner_id.parent_id.zip or self.partner_id.commercial_partner_id.zip,
+            'billing.street1': self.partner_id.street or self.partner_id.parent_id.street or self.partner_id.commercial_partner_id.street,
+            'billing.street2': self.partner_id.street2 or self.partner_id.parent_id.street2 or self.partner_id.commercial_partner_id.street2,
+            'billing.state': self.partner_id.state_id.name or self.partner_id.parent_id.state_id.name or self.partner_id.commercial_partner_id.state_id.name,
+            'notificationUrl': hyperpay_provider.get_hyperpay_urls()['hyperpay_notification_url'],
+            'merchantTransactionId': str(self.reference) + "-" +  str(self.id),
+            'testMode': 'EXTERNAL',
+            
+            
             
         }
         response_content = self.provider_id._hyperpay_make_request(request_values)
