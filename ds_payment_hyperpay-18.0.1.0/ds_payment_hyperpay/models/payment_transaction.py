@@ -42,57 +42,74 @@ class PaymentTransaction(models.Model):
         payment_method_code = self.payment_method_id.code
 
         if payment_method_code == 'mada':
-          entity_id = hyperpay_provider.hyperpay_merchant_id_mada
+                entity_id = hyperpay_provider.hyperpay_merchant_id_mada
         else:
-          entity_id = hyperpay_provider.hyperpay_merchant_id
+                entity_id = hyperpay_provider.hyperpay_merchant_id
         if not entity_id:
-           raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+                raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-        # جمع بيانات العميل من نموذج الشريك
         partner = self.partner_id
-        country_code = partner.country_id.code if partner.country_id else ''
-        state_code = partner.state_id.code if partner.state_id else ''
-
-        # تقسيم الاسم الكامل إلى الاسم الأول واللقب
-        name_parts = partner.name.split()
+    
+            # التحقق من البيانات الأساسية
+        if not partner.email or '@' not in partner.email:
+                raise ValidationError(_("Invalid customer email"))
+    
+        # معالجة الحقول
+        country_code = (partner.country_id.code or '').upper()
+        if not country_code or len(country_code) != 2:
+                raise ValidationError(_("Country code must be 2 characters (e.g. SA)"))
+    
+        state_code = (partner.state_id.code or partner.state_id.name or '')[:3]
+        zip_code = re.sub(r'[^a-zA-Z0-9]', '', partner.zip or '00000')[:10]
+    
+        name_parts = (partner.name or '').strip().split()
         given_name = name_parts[0] if name_parts else ''
-        surname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+        surname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else given_name
 
         request_values = {
-          'entityId': '%s' % entity_id,
-          'amount': "{:.2f}".format(self.amount),
-          'currency': self.currency_id.name,
-          'paymentType': 'DB',
-          'merchantTransactionId': self.reference,
-          # إضافة الحقول الإلزامية
-          'customer.email': partner.email or '',
-          'billing.street1': partner.street or '',
-          'billing.city': partner.city or '',
-          'billing.state': state_code,
-          'billing.country': country_code,
-          'billing.postcode': partner.zip or '',
-          'customer.givenName': given_name,
-          'customer.surname': surname,
-           }
+                'entityId': entity_id,
+                'amount': "{:.2f}".format(self.amount),
+                'currency': self.currency_id.name,
+                'paymentType': 'DB',
+                'merchantTransactionId': self.reference,
+                'customer.email': partner.email,
+                'billing.street1': partner.street or '',
+                'billing.city': partner.city or '',
+                'billing.state': state_code,
+                'billing.country': country_code,
+                'billing.postcode': zip_code,
+                'customer.givenName': given_name[:50],
+                'customer.surname': surname[:50],
+            }
 
-    # إضافة معلمات الاختبار إذا كان في وضع الاختبار
-        if hyperpay_provider.state != 'enabled':  # وضع الاختبار
-          request_values['testMode'] = 'EXTERNAL'
-          request_values['customParameters[3DS2_enrolled]'] = 'true'
+        if hyperpay_provider.state != 'enabled':
+                request_values['testMode'] = 'EXTERNAL'
+                request_values['customParameters[3DS2_enrolled]'] = 'true'
 
+            # تسجيل البيانات المرسلة للتشخيص
+        _logger.info("Sending to HyperPay: %s", request_values)
+    
         response_content = self.provider_id._hyperpay_make_request(request_values)
+    
+        # تسجيل الاستجابة
+        _logger.info("HyperPay response: %s", response_content)
 
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
         response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
+    
         if hyperpay_provider.state == 'enabled':
-          payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+                payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
         else:
-          payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+                payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+    
         response_content['payment_url'] = payment_url
         return response_content
+    
+    
+    
     def _get_tx_from_notification_data(self, provider_code, data):
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
