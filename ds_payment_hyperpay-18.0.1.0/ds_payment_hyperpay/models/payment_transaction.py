@@ -63,7 +63,7 @@ class PaymentTransaction(models.Model):
             'billing.street1': self.partner_id.street or self.partner_id.parent_id.street or self.partner_id.commercial_partner_id.street,
             'billing.street2': self.partner_id.street2 or self.partner_id.parent_id.street2 or self.partner_id.commercial_partner_id.street2,
             'billing.state': self.partner_id.state_id.name or self.partner_id.parent_id.state_id.name or self.partner_id.commercial_partner_id.state_id.name,
-            'notificationUrl': hyperpay_provider.get_hyperpay_urls()['hyperpay_notification_url'],
+            #otificationUrl': hyperpay_provider.get_hyperpay_urls()['hyperpay_notification_url'],
             'merchantTransactionId': str(self.reference) + "-" +  str(self.id),
             'testMode': 'EXTERNAL',
             
