@@ -198,6 +198,7 @@ class PaymentTransaction(models.Model):
         if test_mode:
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
+            request_values['customer.ip'] = '1.2.3.4'
 
         self._log('info', "Create checkout - request", request_values=request_values)
 
