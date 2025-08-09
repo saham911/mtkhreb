@@ -40,17 +40,19 @@ class PaymentTransaction(models.Model):
 
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """Build HyperPay checkout request with strict filtering:
-        - Only required & safe fields + defaults
-        - No billing.state for SA (and most countries)
-        - Sanitize merchantTransactionId (alphanumeric, <=30)
-        - Add customer.mobile (mandatory one-of) & customer.ip (IPv4 if possible)
-        - Try extra IDs; fallback without them if checkout creation rejects
-        - Provide template vars: return_url / brands / provider / amount / wp_locale
+        """
+        COPYandPAY checkout creation (v1/checkouts) with safe, minimal payload:
+        - Test flags (EXTERNAL, 3DS2_enrolled) للـ UAT
+        - customer.*, billing.* كما طلب HyperPay
+        - billing.state مرسل دائمًا: من state_id أو مشتق من المدينة (3 حروف) وإلا RIY
+        - merchantTransactionId مُعقّم (<=30, alnum)
+        - لوج واضح للـ payload والرد
+        - تزويد المتغيرات اللازمة للقالب (return_url/brands/provider/amount/wp_locale)
         """
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
 
+        # entityId حسب طريقة الدفع
         entity_id = provider.hyperpay_merchant_id_mada if pm_code == 'mada' else provider.hyperpay_merchant_id
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % pm_code)
@@ -59,7 +61,10 @@ class PaymentTransaction(models.Model):
 
         # ---------- helpers ----------
         import re as _re
-        def _clean(v): return (v or "").strip()
+
+        def _clean(v):
+            return (v or "").strip()
+
         def _ascii_safe(text):
             s = _clean(text)
             s = _re.sub(r'\s+', ' ', s)
@@ -69,18 +74,24 @@ class PaymentTransaction(models.Model):
             except Exception:
                 s = s.encode('ascii', 'ignore').decode()
             return _re.sub(r'[^A-Za-z0-9 .,\-/#]', '', s).strip()
+
         def _split_name(fullname):
             fullname = _clean(fullname)
-            if not fullname: return "", ""
+            if not fullname:
+                return "", ""
             parts = fullname.split()
             return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
+
         def _ensure_street_ok(street):
             s = _ascii_safe(street)
-            if len(s) < 5 or not _re.search(r'\d', s): s = "King Fahd Road 123"
+            if len(s) < 5 or not _re.search(r'\d', s):
+                s = "King Fahd Road 123"
             return s
+
         def _ensure_city_ok(city):
             c = _ascii_safe(city)
             return c if len(c) >= 2 else "Riyadh"
+
         def _ensure_postcode_ok(zipcode):
             z = _re.sub(r'\D', '', _clean(zipcode))
             return z if 4 <= len(z) <= 10 else "11322"
@@ -93,6 +104,7 @@ class PaymentTransaction(models.Model):
                 return ""
             is_sa = bool(partner_rec.country_id and partner_rec.country_id.code == 'SA')
             if is_sa:
+                # 05XXXXXXXX -> +966-5XXXXXXXX
                 if digits.startswith('05'):
                     digits = '5' + digits[2:]
                 if digits.startswith('5'):
@@ -105,6 +117,7 @@ class PaymentTransaction(models.Model):
                 if digits.startswith('0'):
                     digits = digits[1:]
                 return f"+966-{digits}"
+            # غير السعودية
             if len(digits) > 3:
                 return f"+{digits[:3]}-{digits[3:]}"
             return f"+{digits}-"
@@ -138,9 +151,18 @@ class PaymentTransaction(models.Model):
         country_code = (partner.country_id and (partner.country_id.code or '')) or ''
         country_code = (country_code or 'SA').upper()[:2]
 
-        email_val = _clean(partner.email) or "no-reply@example.com"
-        mobile_val = _format_mobile(partner)  # قد يرجع فارغًا
-        ip_val = _get_ipv4()                  # قد يرجع فارغًا
+        # state: حاول من partner.state_id، وإلا 3 حروف من المدينة، وإلا RIY
+        state_val = ""
+        if getattr(partner, 'state_id', False):
+            state_val = partner.state_id.code or partner.state_id.name or ""
+        state_val = _ascii_safe(state_val).upper()[:3]
+        if not state_val:
+            city_code = _ascii_safe(city).upper()[:3] if city else ""
+            state_val = city_code or "RIY"
+
+        email_val  = _clean(partner.email) or "no-reply@example.com"
+        mobile_val = _format_mobile(partner)   # قد يرجع فارغًا
+        ip_val     = _get_ipv4()               # قد يرجع فارغًا
 
         # ---------- sanitize merchantTransactionId ----------
         raw_ref = self.reference or ""
@@ -160,7 +182,7 @@ class PaymentTransaction(models.Model):
                     invoice_ref = self.invoice_ids[:1].name
             except Exception:
                 invoice_ref = None
-        merchant_invoice_id = re.sub(r'[^A-Za-z0-9]', '', (invoice_ref or merchant_tx_id))[:30]
+        merchant_invoice_id  = re.sub(r'[^A-Za-z0-9]', '', (invoice_ref or merchant_tx_id))[:30]
         merchant_customer_id = str(partner.id)
         currency_code = (self.currency_id.name or "SAR").upper()[:3]
 
@@ -177,24 +199,42 @@ class PaymentTransaction(models.Model):
             'customer.givenName': given,
             'customer.surname': surname,
 
-            # address (minimal)
+            # address
             'billing.street1': street1,
             'billing.city': city,
             'billing.country': country_code,
             'billing.postcode': postcode,
+            'billing.state': state_val,  # << مهم: دائمًا موجود
         }
-        # أضف الجوال و IP فقط إن توفّرت قيمتهما
+
+        # أضف الجوال و IP فقط إن توفّرت
         if mobile_val:
             base_values['customer.mobile'] = mobile_val
         if ip_val:
             base_values['customer.ip'] = ip_val
 
-        # test flags
+        # test flags (UAT)
         if provider.state != 'enabled':
             base_values['testMode'] = 'EXTERNAL'
             base_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        # مفاتيح اختيارية قد تُرفض من بعض القنوات؛ سنحاول بها أولًا ثم نfallback
+        # تحقق تنبيهي للحقول المطلوبة (لن نمنع التنفيذ، فقط نُسجّل)
+        required_fields = {
+            'merchantTransactionId': merchant_tx_id,
+            'customer.email': email_val,
+            'customer.givenName': given,
+            'customer.surname': surname,
+            'billing.street1': street1,
+            'billing.city': city,
+            'billing.state': state_val,
+            'billing.country': country_code,
+            'billing.postcode': postcode,
+        }
+        missing = [k for k, v in required_fields.items() if not _clean(v)]
+        if missing:
+            _logger.warning("HyperPay: بعض الحقول المطلوبة فارغة وسيتم استخدام افتراضيات/مشتقات: %s", missing)
+
+        # مفاتيح اختيارية قد تُرفض؛ سنحاول بها أولاً ثم نfallback
         extra_ids = {
             'merchantCustomerId': merchant_customer_id,
             'merchantInvoiceId': merchant_invoice_id,
@@ -221,7 +261,6 @@ class PaymentTransaction(models.Model):
             raise odoo.exceptions.UserError(_("HyperPay checkout creation failed: %s (%s)") % (desc, code))
 
         # ===== Template vars for COPYandPAY widget =====
-        # return_url = shopperResultUrl (route يستقبل resourcePath)
         return_url = '/payment/hyperpay/return_mada' if pm_code == 'mada' else '/payment/hyperpay/return'
         brands = 'MADA' if pm_code == 'mada' else 'VISA MASTER'
         provider_flag = 'mada' if pm_code == 'mada' else 'hyperpay'
@@ -244,7 +283,7 @@ class PaymentTransaction(models.Model):
             'return_url': return_url,
             'brands': brands,
             'provider': provider_flag,
-            'amount': format_amount(self.env, self.amount, self.currency_id),  # للعرض
+            'amount': format_amount(self.env, self.amount, self.currency_id),
             'wp_locale': wp_locale,
         })
         return response_content
