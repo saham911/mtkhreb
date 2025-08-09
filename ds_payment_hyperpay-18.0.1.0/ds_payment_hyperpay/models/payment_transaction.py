@@ -16,6 +16,7 @@ from odoo.tools import format_amount
 from odoo.exceptions import ValidationError
 from odoo.addons.payment import utils as payment_utils
 from odoo.addons.ds_payment_hyperpay import hyperpay_utils as hyperpay
+from odoo.http import request as http_request  # لالتقاط IP العميل
 
 _logger = logging.getLogger(__name__)
 
@@ -39,11 +40,12 @@ class PaymentTransaction(models.Model):
 
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """Minimal, sanitized checkout payload:
-        - Only required fields (+ defaults)
-        - No billing.state for SA
-        - merchantTransactionId sanitized (alphanumeric, <=30)
-        - If extra IDs cause issues, we fallback automatically.
+        """Build HyperPay checkout request with strict filtering:
+        - Only required & safe fields + defaults
+        - No billing.state for SA (and most countries)
+        - Sanitize merchantTransactionId (alphanumeric, <=30)
+        - Add customer.mobile (mandatory one-of) & customer.ip (IPv4 if possible)
+        - Try extra IDs; fallback without them if checkout creation rejects
         """
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
@@ -82,6 +84,48 @@ class PaymentTransaction(models.Model):
             z = _re.sub(r'\D', '', _clean(zipcode))
             return z if 4 <= len(z) <= 10 else "11322"
 
+        # phone formatter (+ccc-nnnnnnnn) مع تفضيل السعودية
+        def _format_mobile(partner_rec):
+            raw = (partner_rec.mobile or partner_rec.phone or "").strip()
+            digits = re.sub(r'\D', '', raw)
+            if not digits:
+                return ""
+            # لو سعودية:
+            is_sa = bool(partner_rec.country_id and partner_rec.country_id.code == 'SA')
+            if is_sa:
+                # 05XXXXXXXX -> +966-5XXXXXXXX
+                if digits.startswith('05'):
+                    digits = '5' + digits[2:]
+                # 5XXXXXXXX -> +966-5XXXXXXXX
+                if digits.startswith('5'):
+                    return f"+966-{digits}"
+                # 9665XXXXXXXX -> +966-5XXXXXXXX
+                if digits.startswith('966'):
+                    rest = digits[3:]
+                    if rest.startswith('0'):
+                        rest = rest[1:]
+                    return f"+966-{rest}"
+                # أي رقم آخر سعودي: أزل الصفر الأول
+                if digits.startswith('0'):
+                    digits = digits[1:]
+                return f"+966-{digits}"
+            # غير السعودية: حاول تقسيمه كـ +ccc-...
+            if len(digits) > 3:
+                return f"+{digits[:3]}-{digits[3:]}"
+            return f"+{digits}-"
+
+        # استخرج IPv4 من الطلب (X-Forwarded-For أو remote_addr)
+        def _get_ipv4():
+            try:
+                if http_request:
+                    xff = http_request.httprequest.headers.get('X-Forwarded-For', '') or ''
+                    cand = (xff.split(',')[0] or '').strip() or http_request.httprequest.remote_addr or ''
+                    m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', cand)
+                    return m.group(1) if m else ""
+            except Exception:
+                pass
+            return ""
+
         # ---------- names ----------
         given_raw   = getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', '')
         surname_raw = getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', '')
@@ -98,14 +142,17 @@ class PaymentTransaction(models.Model):
         postcode = _ensure_postcode_ok(getattr(partner, 'x_billing_postcode', '') or partner.zip)
         country_code = (partner.country_id and (partner.country_id.code or '')) or ''
         country_code = (country_code or 'SA').upper()[:2]
+
         email_val = _clean(partner.email) or "no-reply@example.com"
+        mobile_val = _format_mobile(partner)  # قد يرجع فارغًا لو ما فيه رقم
+        ip_val = _get_ipv4()                  # قد يرجع فارغًا لو ما قدر يستخرج IPv4
 
         # ---------- sanitize merchantTransactionId ----------
         raw_ref = self.reference or ""
         merchant_tx_id = re.sub(r'[^A-Za-z0-9]', '', raw_ref) or "TX"
         merchant_tx_id = merchant_tx_id[:30]
 
-        # Optional IDs (we'll fallback if rejected)
+        # Optional IDs (قد ترفضها بعض القنوات؛ عندنا fallback)
         invoice_ref = None
         try:
             if getattr(self, 'sale_order_ids', False):
@@ -130,20 +177,29 @@ class PaymentTransaction(models.Model):
             'paymentType': 'DB',
             'merchantTransactionId': merchant_tx_id,
 
+            # customer
             'customer.email': email_val,
             'customer.givenName': given,
             'customer.surname': surname,
 
+            # address (minimal)
             'billing.street1': street1,
             'billing.city': city,
             'billing.country': country_code,
             'billing.postcode': postcode,
         }
+        # أضف الجوال و IP فقط إن توفّرت قيمتهما
+        if mobile_val:
+            base_values['customer.mobile'] = mobile_val
+        if ip_val:
+            base_values['customer.ip'] = ip_val
+
         # test flags
         if provider.state != 'enabled':
             base_values['testMode'] = 'EXTERNAL'
             base_values['customParameters[3DS2_enrolled]'] = 'true'
 
+        # مفاتيح اختيارية قد تُرفض من بعض القنوات؛ سنحاول بها أولًا ثم نfallback
         extra_ids = {
             'merchantCustomerId': merchant_customer_id,
             'merchantInvoiceId': merchant_invoice_id,
@@ -169,6 +225,7 @@ class PaymentTransaction(models.Model):
             code = (response_content.get('result') or {}).get('code') or "N/A"
             raise odoo.exceptions.UserError(_("HyperPay checkout creation failed: %s (%s)") % (desc, code))
 
+        # Prepare rendering values
         response_content.update({
             'action_url': '/payment/hyperpay',
             'checkout_id': checkout_id,
@@ -205,19 +262,18 @@ class PaymentTransaction(models.Model):
         if not ref:
             raise ValidationError(_("HyperPay: No reference found."))
 
-        # Try exact match first
+        # Exact match
         tx = self.search([('reference', '=', ref), ('provider_code', '=', 'hyperpay')], limit=1)
 
-        # Fallback: try alternative sanitized/unsanitized variants
+        # Fallback: sanitized/unsanitized variants
         if not tx:
             candidates = set()
             candidates.add(ref)
-            candidates.add(re.sub(r'[^A-Za-z0-9]', '', ref))  # no punctuation
+            candidates.add(re.sub(r'[^A-Za-z0-9]', '', ref))  # remove punctuation
             if ref.startswith('tx') and '-' not in ref and len(ref) > 2:
-                candidates.add('tx-' + ref[2:])                 # add dash after 'tx'
+                candidates.add('tx-' + ref[2:])
             if '-' in ref:
-                candidates.add(ref.replace('-', ''))            # remove dash
-
+                candidates.add(ref.replace('-', ''))
             tx = self.search([('reference', 'in', list(candidates)), ('provider_code', '=', 'hyperpay')], limit=1)
 
         if not tx:
