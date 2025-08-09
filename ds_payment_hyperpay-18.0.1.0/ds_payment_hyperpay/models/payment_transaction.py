@@ -42,9 +42,9 @@ class PaymentTransaction(models.Model):
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
         """Build HyperPay request from Odoo partner fields (standard or Studio),
-        and sanitize values to avoid 'format error'."""
+        sanitize values, and omit billing.state for countries that don't need it."""
         provider = self.provider_id
-        pm_code = self.payment_method_id.code
+        pm_code  = self.payment_method_id.code
 
         # entityId selection
         entity_id = provider.hyperpay_merchant_id_mada if pm_code == 'mada' else provider.hyperpay_merchant_id
@@ -53,7 +53,7 @@ class PaymentTransaction(models.Model):
 
         partner = self.partner_id  # payer
 
-        # Helpers
+        # ---- helpers ----
         import re as _re
         def _clean(v):
             return (v or "").strip()
@@ -63,7 +63,7 @@ class PaymentTransaction(models.Model):
             s = _clean(text)
             s = _re.sub(r'\s+', ' ', s)
             try:
-                from unidecode import unidecode  # optional dependency
+                from unidecode import unidecode  # optional
                 s = unidecode(s)
             except Exception:
                 s = s.encode('ascii', 'ignore').decode()
@@ -78,48 +78,47 @@ class PaymentTransaction(models.Model):
             parts = fullname.split()
             return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
 
-        # Names (prefer Studio fields, else split)
+        # ---- Names (prefer Studio fields, else split) ----
         given_raw   = getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', '')
         surname_raw = getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', '')
         if not given_raw or not surname_raw:
             s_given, s_surname = _split_name(partner.name or '')
             given_raw   = given_raw   or s_given
             surname_raw = surname_raw or s_surname
-
         given   = _ascii_safe(given_raw)
         surname = _ascii_safe(surname_raw)
 
-        # Address (prefer Studio billing fields, else standard)
+        # ---- Address (prefer Studio billing fields, else standard) ----
         street1  = _ascii_safe(getattr(partner, 'x_billing_street1', '') or partner.street)
         city     = _ascii_safe(getattr(partner, 'x_billing_city', '')    or partner.city)
         postcode = _ascii_safe(getattr(partner, 'x_billing_postcode', '') or partner.zip)
-
-        # state: code -> name fallback
-        state_val_raw = getattr(partner, 'x_billing_state', '') or (
-            partner.state_id and (partner.state_id.code or partner.state_id.name)
-        ) or ''
-        state_val = _ascii_safe(state_val_raw)
 
         # country: ISO Alpha-2; default SA
         country_code = (partner.country_id and (partner.country_id.code or '')) or ''
         country_code = (country_code or 'SA').upper()[:2]
 
-        # Minimal validation
+        # state: code/name then ASCII, but send only for certain countries
+        state_raw = getattr(partner, 'x_billing_state', '') or (
+            partner.state_id and (partner.state_id.code or partner.state_id.name)
+        ) or ''
+        state_val = _ascii_safe(state_raw)
+        COUNTRIES_REQUIRE_STATE = {'US', 'CA', 'AU', 'BR', 'IN', 'CN', 'JP'}
+        send_state = country_code in COUNTRIES_REQUIRE_STATE and bool(state_val)
+
+        # ---- Minimal validation ----
         missing = []
         email_val = _clean(partner.email)
-        if not email_val: missing.append("Email")
-        if not given:     missing.append("Given Name")
-        if not surname:   missing.append("Surname")
-        if not street1:   missing.append("Street")
-        if not city:      missing.append("City")
-        if not postcode:  missing.append("Postcode")
+        if not email_val:   missing.append("Email")
+        if not given:       missing.append("Given Name")
+        if not surname:     missing.append("Surname")
+        if not street1:     missing.append("Street")
+        if not city:        missing.append("City")
+        if not postcode:    missing.append("Postcode")
         if not country_code: missing.append("Country (alpha-2)")
         if missing:
-            raise odoo.exceptions.UserError(
-                "Please complete customer fields before payment: " + ", ".join(missing)
-            )
+            raise odoo.exceptions.UserError("Please complete customer fields before payment: " + ", ".join(missing))
 
-        # Build request (HyperPay format)
+        # ---- Build request (HyperPay format) ----
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
@@ -133,10 +132,11 @@ class PaymentTransaction(models.Model):
 
             'billing.street1': street1,
             'billing.city': city,
-            'billing.state': state_val,           # optional for KSA
-            'billing.country': country_code,      # SA for KSA by default
+            'billing.country': country_code,      # SA by default
             'billing.postcode': postcode,
         }
+        if send_state:
+            request_values['billing.state'] = state_val
 
         # Test-only flags
         if provider.state != 'enabled':  # test mode
@@ -179,7 +179,7 @@ class PaymentTransaction(models.Model):
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
 
-        # === Added log to show final result from HyperPay ===
+        # === Log final HyperPay result for diagnostics ===
         _logger.info(
             "HyperPay final status: code=%s, description=%s, full=%s",
             notification_data.get('result', {}).get('code'),
