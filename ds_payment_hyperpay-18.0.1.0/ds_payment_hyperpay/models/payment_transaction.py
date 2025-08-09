@@ -36,6 +36,63 @@ class PaymentTransaction(models.Model):
             return (parts[0], "")
         return (" ".join(parts[:-1]), parts[-1])
 
+    def _billing_payload_from_partner(self, partner, test_mode=False):
+        """Build billing/customer payload. In test_mode, fill safe defaults if missing."""
+        given_name, surname = self._split_name(partner.name or "")
+
+        email = (partner.email or "").strip()
+        street = (partner.street or "").strip()
+        city = (partner.city or "").strip()
+        postcode = (partner.zip or "").strip()
+        country_code = (partner.country_id and partner.country_id.code) or ""
+        state_value = ""
+        if partner.state_id:
+            state_value = partner.state_id.code or partner.state_id.name or ""
+
+        # In TEST MODE: supply safe defaults to avoid format errors
+        if test_mode:
+            if not email:
+                email = "test@example.com"
+            if not given_name:
+                given_name = "Test"
+            if not surname:
+                surname = "User"
+            if not street:
+                street = "Test Street 1"
+            if not city:
+                city = "Riyadh"
+            if not postcode:
+                postcode = "11564"
+            if not country_code:
+                country_code = "SA"
+
+        # In PROD: enforce required fields
+        missing = []
+        if not email:
+            missing.append("customer.email")
+        if not street:
+            missing.append("billing.street1")
+        if not city:
+            missing.append("billing.city")
+        if not postcode:
+            missing.append("billing.postcode")
+        if not country_code:
+            missing.append("billing.country")
+
+        if missing and not test_mode:
+            raise ValidationError(_("Missing required billing fields: %s") % ", ".join(missing))
+
+        return {
+            'customer.email': email,
+            'customer.givenName': given_name,
+            'customer.surname': surname,
+            'billing.street1': street,
+            'billing.city': city,
+            'billing.state': state_value,
+            'billing.country': country_code,  # ISO Alpha-2
+            'billing.postcode': postcode,
+        }
+
     # ------------------------------
     # Overrides
     # ------------------------------
@@ -60,7 +117,7 @@ class PaymentTransaction(models.Model):
         hyperpay_provider = self.provider_id
         payment_method_code = self.payment_method_id.code
 
-        # اختر الـ entityId حسب طريقة الدفع (MADA أو بطاقات)
+        # Choose entityId by method (MADA vs. Cards)
         if payment_method_code == 'mada':
             entity_id = hyperpay_provider.hyperpay_merchant_id_mada
         else:
@@ -68,51 +125,32 @@ class PaymentTransaction(models.Model):
         if not entity_id:
             raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-        # خذ بيانات العميل من الشريك التجاري الرئيسي لضمان وجود عنوان فوترة
         partner = self.partner_id.commercial_partner_id
+        test_mode = (hyperpay_provider.state != 'enabled')
 
-        # اسم العميل → اسم أول ولقب
-        given_name, surname = self._split_name(partner.name or "")
+        # Build billing/customer payload (with safe defaults in test)
+        billing_payload = self._billing_payload_from_partner(partner, test_mode=test_mode)
 
-        # الدولة/المنطقة بصيغة مطلوبة
-        country_code = (partner.country_id and partner.country_id.code) or ""  # ISO Alpha-2
-        state_value = ""
-        if partner.state_id:
-            state_value = partner.state_id.code or partner.state_id.name or ""
-
-        # باراميترات الطلب الإلزامية + بيانات العميل والفوترة
         request_values = {
             'entityId': entity_id,
             'amount': "{:.2f}".format(self.amount),
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
-
-            # بيانات العميل
-            'customer.email': partner.email or "",
-            'customer.givenName': given_name,
-            'customer.surname': surname,
-
-            # عنوان الفوترة
-            'billing.street1': partner.street or "",
-            'billing.city': partner.city or "",
-            'billing.state': state_value,
-            'billing.country': country_code,
-            'billing.postcode': partner.zip or "",
+            **billing_payload,
         }
 
-        # وضع الاختبار: طالما المزوّد ليس Enabled نرسل testMode + 3DS2
-        if hyperpay_provider.state != 'enabled':
+        if test_mode:
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        # نفّذ طلب إنشاء الـ checkout
+        # Create checkout
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
-        # تجهيز قيم العرض لصفحة الدفع
+        # Prepare rendering values
         response_content['action_url'] = '/payment/hyperpay'
         response_content['checkout_id'] = response_content.get('id')
-        response_content['merchantTransactionId'] = self.reference  # قد لا يرجعها HyperPay في هذه المرحلة
+        response_content['merchantTransactionId'] = self.reference
         response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
         response_content['paymentMethodCode'] = payment_method_code
 
