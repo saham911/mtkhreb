@@ -182,13 +182,6 @@ class PaymentTransaction(models.Model):
             'billing.city': city,
             'billing.country': country_code,
             'billing.postcode': postcode,
-
-            # === NEW: MPGS standingInstruction ===
-            'standingInstruction.type': 'UNSCHEDULED',
-            'standingInstruction.source': 'CIT',
-
-            # === Optional: 3DS preference (جرّب 04 ثم 01 إن لزم) ===
-            'threeDSecure.challengeIndicator': '01',
         }
         # أضف الجوال و IP فقط إن توفّرت قيمتهما
         if mobile_val:
