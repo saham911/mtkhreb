@@ -9,10 +9,13 @@
 import re
 import json
 import logging
+import random
+import string
+
 from werkzeug import urls
 
 import odoo.exceptions
-from odoo import api, models, _
+from odoo import api, models, _, fields
 from odoo.tools import format_amount
 from odoo.exceptions import ValidationError, UserError
 from odoo.addons.payment import utils as payment_utils
@@ -25,7 +28,7 @@ class PaymentTransaction(models.Model):
     _inherit = 'payment.transaction'
 
     # ------------------------------
-    # Helper utilities (logging + safe masking)
+    # Helpers: names, masking, logging
     # ------------------------------
     @staticmethod
     def _split_name(full_name):
@@ -55,21 +58,22 @@ class PaymentTransaction(models.Model):
         safe = {}
         for k, v in data.items():
             key = str(k).lower()
-            if key in ('entityid', 'access_token', 'accesstoken', 'authorization', 'merchant_id', 'merchanttransactionid'):
+            if key in ('entityid', 'access_token', 'accesstoken', 'authorization', 'merchant_id'):
                 safe[k] = cls._masked(v, keep=4)
             else:
                 safe[k] = v
         return json.dumps(safe, ensure_ascii=False, default=str)
 
     def _log(self, level, msg, **kv):
+        """Unified logger. على Odoo.sh ننصح مؤقتًا بطباعة INFO دائمًا أثناء التشخيص."""
         payload = ""
         if kv:
-           try:
-              payload = " | " + self._safe_dump(kv)
-           except Exception:
-              payload = " | <kv-dump-error>"
+            try:
+                payload = " | " + self._safe_dump(kv)
+            except Exception:
+                payload = " | <kv-dump-error>"
         line = f"[HyperPay] (tx:{self.reference or 'N/A'}) {msg}{payload}"
-        # إجبار الإخراج كـ INFO على Odoo.sh
+        # اطبع كـ INFO لضمان الظهور في Odoo.sh
         _logger.info(line)
 
     # ------------------------------
@@ -84,6 +88,8 @@ class PaymentTransaction(models.Model):
         city = (partner.city or "").strip()
         postcode = (partner.zip or "").strip()
         country_code = (partner.country_id and partner.country_id.code) or ""
+
+        # state: أرسله فقط لبلدان تتطلبه (US/CA). لغيرها (مثل SA) لا ترسله لتفادي INVALID_REQUEST.
         state_value = ""
         if partner.state_id:
             state_value = partner.state_id.code or partner.state_id.name or ""
@@ -98,7 +104,7 @@ class PaymentTransaction(models.Model):
             postcode = postcode or "11564"
             country_code = country_code or "SA"
 
-        # In PROD: enforce required fields
+        # In PROD: enforce required fields (بدون state)
         missing = []
         if not email:
             missing.append("customer.email")
@@ -110,7 +116,6 @@ class PaymentTransaction(models.Model):
             missing.append("billing.postcode")
         if not country_code:
             missing.append("billing.country")
-
         if missing and not test_mode:
             raise ValidationError(_("Missing required billing fields: %s") % ", ".join(missing))
 
@@ -120,35 +125,53 @@ class PaymentTransaction(models.Model):
             'customer.surname': surname,
             'billing.street1': street,
             'billing.city': city,
-            #'billing.state': state_value,
             'billing.country': country_code,  # ISO Alpha-2
             'billing.postcode': postcode,
         }
+
         states_required = {'US', 'CA'}
         if country_code in states_required and state_value:
             payload['billing.state'] = state_value
+
         self._log('debug', "Built billing payload", billing_payload=payload, test_mode=test_mode)
         return payload
 
     # ------------------------------
-    # Overrides
+    # Reference generation (≤16, unique)
     # ------------------------------
     @api.model
     def _compute_reference(self, provider_code, prefix=None, separator='-', **kwargs):
-        ref = super()._compute_reference(provider_code, prefix=prefix, separator=separator, **kwargs)
-        if provider_code == 'hyperpay':
-          # ازل أي محارف غير حرف/رقم
-          safe = re.sub(r'[^A-Za-z0-9]', '', ref or '')
-          # حد أقصى 16 محرف: احتفظ بآخر 16 حتى يشمل الختم الزمني
-          if len(safe) > 16:
-            safe = safe[-16:]
-          # تأكد ما طلعنا بسلسلة فارغة (حالة احتياطية)
-          if not safe:
-            # صيغة قصيرة: tx + YYMMDDHHMMSS = 14 حرف
-            safe = 'tx' + fields.Datetime.now().strftime('%y%m%d%H%M%S')
-          return safe
-        return ref
+        # استخدم مرجع افتراضي من أودو
+        base = super()._compute_reference(provider_code, prefix=prefix, separator=separator, **kwargs)
 
+        if provider_code != 'hyperpay':
+            return base
+
+        # نظّف إلى أحرف/أرقام فقط
+        safe = re.sub(r'[^A-Za-z0-9]', '', base or '')
+        # أضف HHMMSS لتمييز كل محاولة
+        safe = f"{safe}{fields.Datetime.now().strftime('%H%M%S')}"
+        # قص إلى 16 محرف كحد أقصى
+        if len(safe) > 16:
+            safe = safe[-16:]
+        if not safe:
+            safe = 'TX' + fields.Datetime.now().strftime('%y%m%d%H%M%S')
+
+        # ضمن الفريدية
+        tries = 0
+        while self.search_count([('reference', '=', safe)]) > 0 and tries < 20:
+            tail = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(2))
+            safe = (safe[:-2] + tail) if len(safe) >= 2 else (safe + tail)
+            tries += 1
+
+        if self.search_count([('reference', '=', safe)]) > 0:
+            raise UserError(_("Could not generate a unique payment reference. Please try again."))
+
+        return safe
+
+    # ------------------------------
+    # Rendering
+    # ------------------------------
     def _get_specific_rendering_values(self, processing_values):
         res = super()._get_specific_rendering_values(processing_values)
         if self.provider_code != 'hyperpay':
@@ -166,7 +189,7 @@ class PaymentTransaction(models.Model):
             raise
 
     # ------------------------------
-    # HyperPay: Create checkout + pass customer/billing data
+    # Create checkout + pass customer/billing data
     # ------------------------------
     def hyperpay_execute_payment(self):
         hyperpay_provider = self.provider_id
@@ -184,7 +207,7 @@ class PaymentTransaction(models.Model):
         partner = self.partner_id.commercial_partner_id
         test_mode = (hyperpay_provider.state != 'enabled')
 
-        # Build billing/customer payload (with safe defaults in test)
+        # Build payload
         billing_payload = self._billing_payload_from_partner(partner, test_mode=test_mode)
 
         request_values = {
@@ -195,9 +218,11 @@ class PaymentTransaction(models.Model):
             'merchantTransactionId': self.reference,
             **billing_payload,
         }
+
         if test_mode:
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
+            # IPv6 قد ترفضه بعض إعدادات MPGS في UAT → استخدم IPv4 ثابتة في الاختبار فقط
             request_values['customer.ip'] = '1.2.3.4'
 
         self._log('info', "Create checkout - request", request_values=request_values)
@@ -305,7 +330,7 @@ class PaymentTransaction(models.Model):
                     tx_status_set = True
                     break
 
-        # PENDING -> error (as per previous code behavior)
+        # PENDING -> error (keeping prior behavior)
         if status_code and not tx_status_set:
             for reg_exp in hyperpay.PAYMENT_STATUS_CODES_REGEX['PENDING']:
                 if re.search(reg_exp, status_code):
