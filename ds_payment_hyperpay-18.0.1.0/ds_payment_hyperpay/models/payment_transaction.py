@@ -40,7 +40,8 @@ class PaymentTransaction(models.Model):
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
         """Build HyperPay request from Odoo partner fields (standard or Studio),
-        sanitize values, enforce minimal address rules, and omit billing.state for SA."""
+        sanitize values, enforce minimal address rules, set standingInstruction for MPGS,
+        and omit billing.state for SA."""
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
 
@@ -56,7 +57,6 @@ class PaymentTransaction(models.Model):
             return (v or "").strip()
 
         def _ascii_safe(text):
-            """Transliterate to ASCII when possible; otherwise drop non-ascii."""
             s = _clean(text)
             s = _re.sub(r'\s+', ' ', s)
             try:
@@ -77,7 +77,6 @@ class PaymentTransaction(models.Model):
         def _ensure_street_ok(street):
             s = _ascii_safe(street)
             if len(s) < 5 or not _re.search(r'\d', s):
-                # فرض شارع اختباري آمن إذا كان قصيرًا/بدون رقم
                 s = "King Fahd Road 123"
             return s
 
@@ -88,12 +87,12 @@ class PaymentTransaction(models.Model):
             return c
 
         def _ensure_postcode_ok(zipcode):
-            z = _re.sub(r'\D', '', _clean(zipcode))  # أرقام فقط
+            z = _re.sub(r'\D', '', _clean(zipcode))
             if len(z) < 4 or len(z) > 10:
                 z = "11322"
             return z
 
-        # ---- Names (prefer Studio fields, else split) ----
+        # ---- Names ----
         given_raw   = getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', '')
         surname_raw = getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', '')
         if not given_raw or not surname_raw:
@@ -103,7 +102,7 @@ class PaymentTransaction(models.Model):
         given   = _ascii_safe(given_raw)
         surname = _ascii_safe(surname_raw)
 
-        # ---- Address (prefer Studio billing fields, else standard) ----
+        # ---- Address ----
         street1  = _ensure_street_ok(getattr(partner, 'x_billing_street1', '') or partner.street)
         city     = _ensure_city_ok(getattr(partner, 'x_billing_city', '')    or partner.city)
         postcode = _ensure_postcode_ok(getattr(partner, 'x_billing_postcode', '') or partner.zip)
@@ -149,6 +148,10 @@ class PaymentTransaction(models.Model):
             'billing.city': city,
             'billing.country': country_code,
             'billing.postcode': postcode,
+
+            # MPGS standingInstruction to avoid INSTALLMENT default issues
+            'standingInstruction.type': 'UNSCHEDULED',
+            'standingInstruction.source': 'CIT',
         }
         if send_state:
             request_values['billing.state'] = state_val
@@ -158,12 +161,13 @@ class PaymentTransaction(models.Model):
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        _logger.info("HyperPay request payload (sanitized): %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
+        _logger.info(
+            "HyperPay request payload (sanitized): %s",
+            {k: v for k, v in request_values.items() if k not in ('entityId',)}
+        )
 
-        # Send request
         response_content = provider._hyperpay_make_request(request_values)
 
-        # Prepare rendering values
         checkout_id = response_content.get('id')
         response_content.update({
             'action_url': '/payment/hyperpay',
