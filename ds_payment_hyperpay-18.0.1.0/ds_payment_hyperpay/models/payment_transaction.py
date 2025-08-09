@@ -39,12 +39,12 @@ class PaymentTransaction(models.Model):
 
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """Build a MINIMAL HyperPay request with strict filtering:
-        - Only required fields (sanitized to ASCII)
-        - Defaults when Odoo values are missing
-        - Remove billing.state for countries that don't need it (e.g., SA)
-        - Sanitize merchantTransactionId (alphanumeric, <=30)
-        - Send merchantCustomerId and merchantInvoiceId explicitly
+        """Build HyperPay checkout request with strict filtering.
+        - نرسل أقل قدر لازم من الحقول وبصيغة صحيحة
+        - نحط قيم افتراضية آمنة لو ناقصة في Odoo
+        - لا نرسل billing.state لبلدان لا تتطلبه (مثل SA)
+        - ننظف merchantTransactionId إلى أبجدي-رقمي وبحد أقصى 30
+        - نحاول إضافة merchantCustomerId / merchantInvoiceId، ولو فشل الإنشاء نعيد المحاولة بدونهم
         """
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
@@ -63,7 +63,7 @@ class PaymentTransaction(models.Model):
             s = _clean(text)
             s = _re.sub(r'\s+', ' ', s)
             try:
-                from unidecode import unidecode
+                from unidecode import unidecode  # optional
                 s = unidecode(s)
             except Exception:
                 s = s.encode('ascii', 'ignore').decode()
@@ -78,7 +78,7 @@ class PaymentTransaction(models.Model):
         def _ensure_street_ok(street):
             s = _ascii_safe(street)
             if len(s) < 5 or not _re.search(r'\d', s):
-                s = "King Fahd Road 123"  # safe default
+                s = "King Fahd Road 123"
             return s
 
         def _ensure_city_ok(city):
@@ -114,7 +114,7 @@ class PaymentTransaction(models.Model):
         merchant_tx_id = re.sub(r'[^A-Za-z0-9]', '', raw_ref) or "TX"
         merchant_tx_id = merchant_tx_id[:30]
 
-        # merchantInvoiceId: try Sale Order then Invoice then fallback to tx id
+        # merchantInvoiceId: SO ثم Invoice ثم fallback
         invoice_ref = None
         try:
             if getattr(self, 'sale_order_ids', False):
@@ -129,55 +129,66 @@ class PaymentTransaction(models.Model):
                 invoice_ref = None
         merchant_invoice_id = re.sub(r'[^A-Za-z0-9]', '', (invoice_ref or merchant_tx_id))[:30]
 
-        # merchantCustomerId: Odoo partner id
         merchant_customer_id = str(partner.id)
 
-        # also ensure currency is 3-letter upper
         currency_code = (self.currency_id.name or "SAR").upper()[:3]
 
-        # ---------- build payload ----------
-        request_values = {
+        # ---------- base payload (الحد الأدنى) ----------
+        base_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
             'currency': currency_code,
             'paymentType': 'DB',
-
-            # identifiers
             'merchantTransactionId': merchant_tx_id,
-            'merchantCustomerId': merchant_customer_id,
-            'merchantInvoiceId': merchant_invoice_id,
 
-            # customer
             'customer.email': email_val,
             'customer.givenName': given,
             'customer.surname': surname,
 
-            # billing (minimal)
             'billing.street1': street1,
             'billing.city': city,
             'billing.country': country_code,
             'billing.postcode': postcode,
         }
-        # NOTE: intentionally NOT sending billing.state
+        # لا نرسل billing.state
+
+        # معرّفات اختيارية (قد يرفضها بعض القنوات)
+        extra_ids = {
+            'merchantCustomerId': merchant_customer_id,
+            'merchantInvoiceId': merchant_invoice_id,
+        }
 
         # test flags
         if provider.state != 'enabled':
-            request_values['testMode'] = 'EXTERNAL'
-            request_values['customParameters[3DS2_enrolled]'] = 'true'
+            base_values['testMode'] = 'EXTERNAL'
+            base_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        _logger.info(
-            "HyperPay request payload (minimal+ids): %s",
-            {k: v for k, v in request_values.items() if k not in ('entityId',)}
-        )
-
-        # send
+        # ---------- attempt #1: مع extra ids ----------
+        request_values = dict(base_values, **extra_ids)
+        _logger.info("HyperPay payload attempt#1: %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
         response_content = provider._hyperpay_make_request(request_values)
+        _logger.info("HyperPay create-checkout response#1: %s", response_content)
 
         checkout_id = response_content.get('id')
+        if not checkout_id:
+            # ---------- attempt #2: بدون extra ids ----------
+            request_values = dict(base_values)  # minimum only
+            _logger.info("HyperPay payload attempt#2 (fallback, no extra ids): %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
+            response_content = provider._hyperpay_make_request(request_values)
+            _logger.info("HyperPay create-checkout response#2: %s", response_content)
+            checkout_id = response_content.get('id')
+
+        # إن ما زال ما عندنا checkout_id، أظهر خطأ واضح
+        if not checkout_id:
+            desc = (response_content.get('result') or {}).get('description') or "Unknown error"
+            code = (response_content.get('result') or {}).get('code') or "N/A"
+            raise odoo.exceptions.UserError(_("HyperPay checkout creation failed: %s (%s)") % (desc, code))
+
+        # Prepare rendering values
         response_content.update({
             'action_url': '/payment/hyperpay',
             'checkout_id': checkout_id,
-            'merchantTransactionId': response_content.get('merchantTransactionId'),
+            'merchantTransactionId': response_content.get('merchantTransactionId') or merchant_tx_id,
             'formatted_amount': format_amount(self.env, self.amount, self.currency_id),
             'paymentMethodCode': pm_code,
             'payment_url': (
