@@ -16,7 +16,6 @@ from odoo.tools import format_amount
 from odoo.exceptions import ValidationError
 from odoo.addons.payment import utils as payment_utils
 from odoo.addons.ds_payment_hyperpay import hyperpay_utils as hyperpay
-from odoo.http import request as http_request  # لالتقاط IP العميل
 
 _logger = logging.getLogger(__name__)
 
@@ -38,295 +37,51 @@ class PaymentTransaction(models.Model):
             raise odoo.exceptions.UserError("This currency is not supported with selected payment method.")
         return self.hyperpay_execute_payment()
 
-    # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """
-        COPYandPAY checkout creation (v1/checkouts) with safe, minimal payload:
-        - Test flags (EXTERNAL, 3DS2_enrolled) للـ UAT
-        - customer.*, billing.* كما طلب HyperPay
-        - billing.state مرسل دائمًا: من state_id أو مشتق من المدينة (3 حروف) وإلا RIY
-        - merchantTransactionId مُعقّم (<=30, alnum)
-        - لوج واضح للـ payload والرد
-        - تزويد المتغيرات اللازمة للقالب (return_url/brands/provider/amount/wp_locale)
-        """
-        provider = self.provider_id
-        pm_code  = self.payment_method_id.code
+        hyperpay_provider = self.provider_id
+        payment_method_code = self.payment_method_id.code
 
-        # entityId حسب طريقة الدفع
-        entity_id = provider.hyperpay_merchant_id_mada if pm_code == 'mada' else provider.hyperpay_merchant_id
+        if payment_method_code == 'mada':
+            entity_id = hyperpay_provider.hyperpay_merchant_id_mada
+        else:
+            entity_id = hyperpay_provider.hyperpay_merchant_id
         if not entity_id:
-            raise ValidationError("No entityID provided for '%s' transactions." % pm_code)
+            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
 
-        partner = self.partner_id
-
-        # ---------- helpers ----------
-        import re as _re
-
-        def _clean(v):
-            return (v or "").strip()
-
-        def _ascii_safe(text):
-            s = _clean(text)
-            s = _re.sub(r'\s+', ' ', s)
-            try:
-                from unidecode import unidecode
-                s = unidecode(s)
-            except Exception:
-                s = s.encode('ascii', 'ignore').decode()
-            return _re.sub(r'[^A-Za-z0-9 .,\-/#]', '', s).strip()
-
-        def _split_name(fullname):
-            fullname = _clean(fullname)
-            if not fullname:
-                return "", ""
-            parts = fullname.split()
-            return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
-
-        def _ensure_street_ok(street):
-            s = _ascii_safe(street)
-            if len(s) < 5 or not _re.search(r'\d', s):
-                s = "King Fahd Road 123"
-            return s
-
-        def _ensure_city_ok(city):
-            c = _ascii_safe(city)
-            return c if len(c) >= 2 else "Riyadh"
-
-        def _ensure_postcode_ok(zipcode):
-            z = _re.sub(r'\D', '', _clean(zipcode))
-            return z if 4 <= len(z) <= 10 else "11322"
-
-        # phone formatter (+ccc-nnnnnnnn) مع تفضيل السعودية
-        def _format_mobile(partner_rec):
-            raw = (partner_rec.mobile or partner_rec.phone or "").strip()
-            digits = re.sub(r'\D', '', raw)
-            if not digits:
-                return ""
-            is_sa = bool(partner_rec.country_id and partner_rec.country_id.code == 'SA')
-            if is_sa:
-                # 05XXXXXXXX -> +966-5XXXXXXXX
-                if digits.startswith('05'):
-                    digits = '5' + digits[2:]
-                if digits.startswith('5'):
-                    return f"+966-{digits}"
-                if digits.startswith('966'):
-                    rest = digits[3:]
-                    if rest.startswith('0'):
-                        rest = rest[1:]
-                    return f"+966-{rest}"
-                if digits.startswith('0'):
-                    digits = digits[1:]
-                return f"+966-{digits}"
-            # غير السعودية
-            if len(digits) > 3:
-                return f"+{digits[:3]}-{digits[3:]}"
-            return f"+{digits}-"
-
-        # استخرج IPv4 من الطلب (X-Forwarded-For أو remote_addr)
-        def _get_ipv4():
-            try:
-                if http_request:
-                    xff = http_request.httprequest.headers.get('X-Forwarded-For', '') or ''
-                    cand = (xff.split(',')[0] or '').strip() or http_request.httprequest.remote_addr or ''
-                    m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', cand)
-                    return m.group(1) if m else ""
-            except Exception:
-                pass
-            return ""
-
-        # ---------- names ----------
-        given_raw   = getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', '')
-        surname_raw = getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', '')
-        if not given_raw or not surname_raw:
-            s_given, s_surname = _split_name(partner.name or '')
-            given_raw   = given_raw   or s_given
-            surname_raw = surname_raw or s_surname
-        given   = _ascii_safe(given_raw) or "Customer"
-        surname = _ascii_safe(surname_raw) or "Name"
-
-        # ---------- address ----------
-        street1  = _ensure_street_ok(getattr(partner, 'x_billing_street1', '') or partner.street)
-        city     = _ensure_city_ok(getattr(partner, 'x_billing_city', '')    or partner.city)
-        postcode = _ensure_postcode_ok(getattr(partner, 'x_billing_postcode', '') or partner.zip)
-        country_code = (partner.country_id and (partner.country_id.code or '')) or ''
-        country_code = (country_code or 'SA').upper()[:2]
-
-        # state: حاول من partner.state_id، وإلا 3 حروف من المدينة، وإلا RIY
-        state_val = ""
-        if getattr(partner, 'state_id', False):
-            state_val = partner.state_id.code or partner.state_id.name or ""
-        state_val = _ascii_safe(state_val).upper()[:3]
-        if not state_val:
-            city_code = _ascii_safe(city).upper()[:3] if city else ""
-            state_val = city_code or "RIY"
-
-        email_val  = _clean(partner.email) or "no-reply@example.com"
-        mobile_val = _format_mobile(partner)   # قد يرجع فارغًا
-        ip_val     = _get_ipv4()               # قد يرجع فارغًا
-
-        # ---------- sanitize merchantTransactionId ----------
-        raw_ref = self.reference or ""
-        merchant_tx_id = re.sub(r'[^A-Za-z0-9]', '', raw_ref) or "TX"
-        merchant_tx_id = merchant_tx_id[:30]
-
-        # Optional IDs (قد تُرفض من بعض القنوات؛ لدينا fallback)
-        invoice_ref = None
-        try:
-            if getattr(self, 'sale_order_ids', False):
-                invoice_ref = self.sale_order_ids[:1].name
-        except Exception:
-            invoice_ref = None
-        if not invoice_ref:
-            try:
-                if getattr(self, 'invoice_ids', False):
-                    invoice_ref = self.invoice_ids[:1].name
-            except Exception:
-                invoice_ref = None
-        merchant_invoice_id  = re.sub(r'[^A-Za-z0-9]', '', (invoice_ref or merchant_tx_id))[:30]
-        merchant_customer_id = str(partner.id)
-        currency_code = (self.currency_id.name or "SAR").upper()[:3]
-
-        # ---------- base payload ----------
-        base_values = {
+        request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
-            'currency': currency_code,
+            'currency': self.currency_id.name,
             'paymentType': 'DB',
-            'merchantTransactionId': merchant_tx_id,
-
-            # customer
-            'customer.email': email_val,
-            'customer.givenName': given,
-            'customer.surname': surname,
-
-            # address
-            'billing.street1': street1,
-            'billing.city': city,
-            'billing.country': country_code,
-            'billing.postcode': postcode,
-            'billing.state': state_val,  # << مهم: دائمًا موجود
+            'merchantTransactionId': self.reference,
         }
+        response_content = self.provider_id._hyperpay_make_request(request_values)
 
-        # أضف الجوال و IP فقط إن توفّرت
-        if mobile_val:
-            base_values['customer.mobile'] = mobile_val
-        if ip_val:
-            base_values['customer.ip'] = ip_val
-
-        # test flags (UAT)
-        if provider.state != 'enabled':
-            base_values['testMode'] = 'EXTERNAL'
-            base_values['customParameters[3DS2_enrolled]'] = 'true'
-
-        # تحقق تنبيهي للحقول المطلوبة (لن نمنع التنفيذ، فقط نُسجّل)
-        required_fields = {
-            'merchantTransactionId': merchant_tx_id,
-            'customer.email': email_val,
-            'customer.givenName': given,
-            'customer.surname': surname,
-            'billing.street1': street1,
-            'billing.city': city,
-            'billing.state': state_val,
-            'billing.country': country_code,
-            'billing.postcode': postcode,
-        }
-        missing = [k for k, v in required_fields.items() if not _clean(v)]
-        if missing:
-            _logger.warning("HyperPay: بعض الحقول المطلوبة فارغة وسيتم استخدام افتراضيات/مشتقات: %s", missing)
-
-        # مفاتيح اختيارية قد تُرفض؛ سنحاول بها أولاً ثم نfallback
-        extra_ids = {
-            'merchantCustomerId': merchant_customer_id,
-            'merchantInvoiceId': merchant_invoice_id,
-        }
-
-        # Attempt #1 (with extra ids)
-        request_values = dict(base_values, **extra_ids)
-        _logger.info("HyperPay payload attempt#1: %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
-        response_content = provider._hyperpay_make_request(request_values)
-        _logger.info("HyperPay create-checkout response#1: %s", response_content)
-        checkout_id = response_content.get('id')
-
-        # Fallback #2 (without extra ids)
-        if not checkout_id:
-            request_values = dict(base_values)
-            _logger.info("HyperPay payload attempt#2 (fallback, no extra ids): %s", {k: v for k, v in request_values.items() if k not in ('entityId',)})
-            response_content = provider._hyperpay_make_request(request_values)
-            _logger.info("HyperPay create-checkout response#2: %s", response_content)
-            checkout_id = response_content.get('id')
-
-        if not checkout_id:
-            desc = (response_content.get('result') or {}).get('description') or "Unknown error"
-            code = (response_content.get('result') or {}).get('code') or "N/A"
-            raise odoo.exceptions.UserError(_("HyperPay checkout creation failed: %s (%s)") % (desc, code))
-
-        # ===== Template vars for COPYandPAY widget =====
-        return_url = '/payment/hyperpay/return_mada' if pm_code == 'mada' else '/payment/hyperpay/return'
-        brands = 'MADA' if pm_code == 'mada' else 'VISA MASTER'
-        provider_flag = 'mada' if pm_code == 'mada' else 'hyperpay'
-        wp_locale = (self.env.context.get('lang') or self.env.user.lang or 'en').split('_')[0]
-
-        # Prepare rendering values
-        response_content.update({
-            'action_url': '/payment/hyperpay',
-            'checkout_id': checkout_id,
-            'merchantTransactionId': response_content.get('merchantTransactionId') or merchant_tx_id,
-            'formatted_amount': format_amount(self.env, self.amount, self.currency_id),
-            'paymentMethodCode': pm_code,
-            'payment_url': (
-                "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s"
-                if provider.state == 'enabled'
-                else "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s"
-            ) % checkout_id,
-
-            # === vars used by payment_hyperpay_templates.xml ===
-            'return_url': return_url,
-            'brands': brands,
-            'provider': provider_flag,
-            'amount': format_amount(self.env, self.amount, self.currency_id),
-            'wp_locale': wp_locale,
-        })
+        response_content['action_url'] = '/payment/hyperpay'
+        response_content['checkout_id'] = response_content.get('id')
+        response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
+        response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
+        response_content['paymentMethodCode'] = payment_method_code
+        if hyperpay_provider.state == 'enabled':
+            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+        else:
+            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
+        response_content['payment_url'] = payment_url
         return response_content
-    # ==================  /HyperPay: execute payment  ================== #
 
     def _get_tx_from_notification_data(self, provider_code, data):
-        """Map HyperPay callback to our tx even if merchantTransactionId was sanitized."""
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
             return tx
-
         payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + data.get('resourcePath')
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
-
-        _logger.info(
-            "HyperPay final status: code=%s, description=%s, full=%s",
-            notification_data.get('result', {}).get('code'),
-            notification_data.get('result', {}).get('description'),
-            notification_data
-        )
-
-        ref = notification_data.get('merchantTransactionId', False)
-        if not ref:
+        reference = notification_data.get('merchantTransactionId', False)
+        if not reference:
             raise ValidationError(_("HyperPay: No reference found."))
-
-        # Exact match
-        tx = self.search([('reference', '=', ref), ('provider_code', '=', 'hyperpay')], limit=1)
-
-        # Fallback: sanitized/unsanitized variants
+        tx = self.search([('reference', '=', reference), ('provider_code', '=', 'hyperpay')])
         if not tx:
-            candidates = set()
-            candidates.add(ref)
-            candidates.add(re.sub(r'[^A-Za-z0-9]', '', ref))  # remove punctuation
-            if ref.startswith('tx') and '-' not in ref and len(ref) > 2:
-                candidates.add('tx-' + ref[2:])
-            if '-' in ref:
-                candidates.add(ref.replace('-', ''))
-            tx = self.search([('reference', 'in', list(candidates)), ('provider_code', '=', 'hyperpay')], limit=1)
-
-        if not tx:
-            raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % ref)
-
+            raise ValidationError(_("HyperPay: No transaction found matching reference %s.") % reference)
         tx._handle_hyperpay_payment_status(notification_data)
         return tx
 
@@ -374,8 +129,7 @@ class PaymentTransaction(models.Model):
                         break
 
             if not tx_status_set:
-                _logger.warning(
-                    "Received unrecognized payment state %s for transaction with reference %s\nDetailed Message:%s",
-                    status_code, self.reference, status.get('description')
-                )
+                _logger.warning("Received unrecognized payment state %s for "
+                                "transaction with reference %s\nDetailed Message:%s", status_code, self.reference,
+                                status.get('description'))
                 self._set_error("HyperPay: " + _("Invalid payment status."))
