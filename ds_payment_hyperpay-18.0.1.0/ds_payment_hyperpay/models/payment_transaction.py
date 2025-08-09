@@ -62,22 +62,15 @@ class PaymentTransaction(models.Model):
         return json.dumps(safe, ensure_ascii=False, default=str)
 
     def _log(self, level, msg, **kv):
-        """Unified logger with safe kv dump."""
         payload = ""
         if kv:
-            try:
-                payload = " | " + self._safe_dump(kv)
-            except Exception:
-                payload = " | <kv-dump-error>"
+           try:
+              payload = " | " + self._safe_dump(kv)
+           except Exception:
+              payload = " | <kv-dump-error>"
         line = f"[HyperPay] (tx:{self.reference or 'N/A'}) {msg}{payload}"
-        if level == 'debug':
-            _logger.debug(line)
-        elif level == 'warning':
-            _logger.warning(line)
-        elif level == 'error':
-            _logger.error(line)
-        else:
-            _logger.info(line)
+        # إجبار الإخراج كـ INFO على Odoo.sh
+        _logger.info(line)
 
     # ------------------------------
     # Build billing/customer payload
