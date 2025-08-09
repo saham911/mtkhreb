@@ -188,7 +188,7 @@ class PaymentTransaction(models.Model):
             'standingInstruction.source': 'CIT',
 
             # === Optional: 3DS preference (جرّب 04 ثم 01 إن لزم) ===
-            'threeDSecure.challengeIndicator': '04',
+            'threeDSecure.challengeIndicator': '01',
         }
         # أضف الجوال و IP فقط إن توفّرت قيمتهما
         if mobile_val:
