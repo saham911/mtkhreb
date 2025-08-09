@@ -54,6 +54,7 @@ class PaymentTransaction(models.Model):
             'currency': self.currency_id.name,
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
+            
         }
         response_content = self.provider_id._hyperpay_make_request(request_values)
 
