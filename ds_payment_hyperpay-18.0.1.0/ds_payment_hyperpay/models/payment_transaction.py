@@ -41,7 +41,8 @@ class PaymentTransaction(models.Model):
 
     # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        """Builds HyperPay request from Odoo partner fields (standard or Studio)."""
+        """Build HyperPay request from Odoo partner fields (standard or Studio),
+        and sanitize values to avoid 'format error'."""
         provider = self.provider_id
         pm_code = self.payment_method_id.code
 
@@ -53,8 +54,22 @@ class PaymentTransaction(models.Model):
         partner = self.partner_id  # payer
 
         # Helpers
+        import re as _re
         def _clean(v):
             return (v or "").strip()
+
+        def _ascii_safe(text):
+            """Transliterate to ASCII when possible; otherwise drop non-ascii."""
+            s = _clean(text)
+            s = _re.sub(r'\s+', ' ', s)
+            try:
+                from unidecode import unidecode  # optional dependency
+                s = unidecode(s)
+            except Exception:
+                s = s.encode('ascii', 'ignore').decode()
+            # keep common punctuation
+            s = _re.sub(r'[^A-Za-z0-9 .,\-/#]', '', s)
+            return s.strip()
 
         def _split_name(fullname):
             fullname = _clean(fullname)
@@ -64,23 +79,26 @@ class PaymentTransaction(models.Model):
             return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
 
         # Names (prefer Studio fields, else split)
-        given = _clean(getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', ''))
-        surname = _clean(getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', ''))
-        if not given or not surname:
+        given_raw   = getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', '')
+        surname_raw = getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', '')
+        if not given_raw or not surname_raw:
             s_given, s_surname = _split_name(partner.name or '')
-            given = given or s_given
-            surname = surname or s_surname
+            given_raw   = given_raw   or s_given
+            surname_raw = surname_raw or s_surname
+
+        given   = _ascii_safe(given_raw)
+        surname = _ascii_safe(surname_raw)
 
         # Address (prefer Studio billing fields, else standard)
-        street1 = _clean(getattr(partner, 'x_billing_street1', '') or partner.street)
-        city = _clean(getattr(partner, 'x_billing_city', '') or partner.city)
-        postcode = _clean(getattr(partner, 'x_billing_postcode', '') or partner.zip)
+        street1  = _ascii_safe(getattr(partner, 'x_billing_street1', '') or partner.street)
+        city     = _ascii_safe(getattr(partner, 'x_billing_city', '')    or partner.city)
+        postcode = _ascii_safe(getattr(partner, 'x_billing_postcode', '') or partner.zip)
 
         # state: code -> name fallback
-        state_val = getattr(partner, 'x_billing_state', '') or (
+        state_val_raw = getattr(partner, 'x_billing_state', '') or (
             partner.state_id and (partner.state_id.code or partner.state_id.name)
         ) or ''
-        state_val = _clean(state_val)
+        state_val = _ascii_safe(state_val_raw)
 
         # country: ISO Alpha-2; default SA
         country_code = (partner.country_id and (partner.country_id.code or '')) or ''
@@ -88,13 +106,14 @@ class PaymentTransaction(models.Model):
 
         # Minimal validation
         missing = []
-        if not _clean(partner.email): missing.append("Email")
-        if not given:                 missing.append("Given Name")
-        if not surname:               missing.append("Surname")
-        if not street1:               missing.append("Street")
-        if not city:                  missing.append("City")
-        if not postcode:              missing.append("Postcode")
-        if not country_code:          missing.append("Country (alpha-2)")
+        email_val = _clean(partner.email)
+        if not email_val: missing.append("Email")
+        if not given:     missing.append("Given Name")
+        if not surname:   missing.append("Surname")
+        if not street1:   missing.append("Street")
+        if not city:      missing.append("City")
+        if not postcode:  missing.append("Postcode")
+        if not country_code: missing.append("Country (alpha-2)")
         if missing:
             raise odoo.exceptions.UserError(
                 "Please complete customer fields before payment: " + ", ".join(missing)
@@ -108,14 +127,14 @@ class PaymentTransaction(models.Model):
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
 
-            'customer.email': _clean(partner.email),
+            'customer.email': email_val,
             'customer.givenName': given,
             'customer.surname': surname,
 
             'billing.street1': street1,
             'billing.city': city,
-            'billing.state': state_val,
-            'billing.country': country_code,  # SA for KSA by default
+            'billing.state': state_val,           # optional for KSA
+            'billing.country': country_code,      # SA for KSA by default
             'billing.postcode': postcode,
         }
 
@@ -123,6 +142,12 @@ class PaymentTransaction(models.Model):
         if provider.state != 'enabled':  # test mode
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
+
+        # Debug payload (safe)
+        _logger.info(
+            "HyperPay request payload (sanitized): %s",
+            {k: v for k, v in request_values.items() if k not in ('entityId',)}
+        )
 
         # Send request
         response_content = provider._hyperpay_make_request(request_values)
@@ -149,9 +174,19 @@ class PaymentTransaction(models.Model):
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
             return tx
+
         payment_status_url = self.provider_id.get_hyperpay_urls()['hyperpay_process_url'] + data.get('resourcePath')
         provider = self.env['payment.provider'].search([('code', '=', 'hyperpay')], limit=1)
         notification_data = provider._hyperpay_get_payment_status(payment_status_url, provider_code)
+
+        # === Added log to show final result from HyperPay ===
+        _logger.info(
+            "HyperPay final status: code=%s, description=%s, full=%s",
+            notification_data.get('result', {}).get('code'),
+            notification_data.get('result', {}).get('description'),
+            notification_data
+        )
+
         reference = notification_data.get('merchantTransactionId', False)
         if not reference:
             raise ValidationError(_("HyperPay: No reference found."))
