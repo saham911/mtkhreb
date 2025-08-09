@@ -46,6 +46,7 @@ class PaymentTransaction(models.Model):
         - Sanitize merchantTransactionId (alphanumeric, <=30)
         - Add customer.mobile (mandatory one-of) & customer.ip (IPv4 if possible)
         - Try extra IDs; fallback without them if checkout creation rejects
+        - Provide template vars: return_url / brands / provider / amount / wp_locale
         """
         provider = self.provider_id
         pm_code  = self.payment_method_id.code
@@ -90,26 +91,20 @@ class PaymentTransaction(models.Model):
             digits = re.sub(r'\D', '', raw)
             if not digits:
                 return ""
-            # لو سعودية:
             is_sa = bool(partner_rec.country_id and partner_rec.country_id.code == 'SA')
             if is_sa:
-                # 05XXXXXXXX -> +966-5XXXXXXXX
                 if digits.startswith('05'):
                     digits = '5' + digits[2:]
-                # 5XXXXXXXX -> +966-5XXXXXXXX
                 if digits.startswith('5'):
                     return f"+966-{digits}"
-                # 9665XXXXXXXX -> +966-5XXXXXXXX
                 if digits.startswith('966'):
                     rest = digits[3:]
                     if rest.startswith('0'):
                         rest = rest[1:]
                     return f"+966-{rest}"
-                # أي رقم آخر سعودي: أزل الصفر الأول
                 if digits.startswith('0'):
                     digits = digits[1:]
                 return f"+966-{digits}"
-            # غير السعودية: حاول تقسيمه كـ +ccc-...
             if len(digits) > 3:
                 return f"+{digits[:3]}-{digits[3:]}"
             return f"+{digits}-"
@@ -144,15 +139,15 @@ class PaymentTransaction(models.Model):
         country_code = (country_code or 'SA').upper()[:2]
 
         email_val = _clean(partner.email) or "no-reply@example.com"
-        mobile_val = _format_mobile(partner)  # قد يرجع فارغًا لو ما فيه رقم
-        ip_val = _get_ipv4()                  # قد يرجع فارغًا لو ما قدر يستخرج IPv4
+        mobile_val = _format_mobile(partner)  # قد يرجع فارغًا
+        ip_val = _get_ipv4()                  # قد يرجع فارغًا
 
         # ---------- sanitize merchantTransactionId ----------
         raw_ref = self.reference or ""
         merchant_tx_id = re.sub(r'[^A-Za-z0-9]', '', raw_ref) or "TX"
         merchant_tx_id = merchant_tx_id[:30]
 
-        # Optional IDs (قد ترفضها بعض القنوات؛ عندنا fallback)
+        # Optional IDs (قد تُرفض من بعض القنوات؛ لدينا fallback)
         invoice_ref = None
         try:
             if getattr(self, 'sale_order_ids', False):
@@ -187,6 +182,13 @@ class PaymentTransaction(models.Model):
             'billing.city': city,
             'billing.country': country_code,
             'billing.postcode': postcode,
+
+            # === NEW: MPGS standingInstruction ===
+            'standingInstruction.type': 'UNSCHEDULED',
+            'standingInstruction.source': 'CIT',
+
+            # === Optional: 3DS preference (جرّب 04 ثم 01 إن لزم) ===
+            'threeDSecure.challengeIndicator': '04',
         }
         # أضف الجوال و IP فقط إن توفّرت قيمتهما
         if mobile_val:
@@ -225,6 +227,13 @@ class PaymentTransaction(models.Model):
             code = (response_content.get('result') or {}).get('code') or "N/A"
             raise odoo.exceptions.UserError(_("HyperPay checkout creation failed: %s (%s)") % (desc, code))
 
+        # ===== Template vars for COPYandPAY widget =====
+        # return_url = shopperResultUrl (route يستقبل resourcePath)
+        return_url = '/payment/hyperpay/return_mada' if pm_code == 'mada' else '/payment/hyperpay/return'
+        brands = 'MADA' if pm_code == 'mada' else 'VISA MASTER'
+        provider_flag = 'mada' if pm_code == 'mada' else 'hyperpay'
+        wp_locale = (self.env.context.get('lang') or self.env.user.lang or 'en').split('_')[0]
+
         # Prepare rendering values
         response_content.update({
             'action_url': '/payment/hyperpay',
@@ -236,7 +245,14 @@ class PaymentTransaction(models.Model):
                 "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s"
                 if provider.state == 'enabled'
                 else "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s"
-            ) % checkout_id
+            ) % checkout_id,
+
+            # === vars used by payment_hyperpay_templates.xml ===
+            'return_url': return_url,
+            'brands': brands,
+            'provider': provider_flag,
+            'amount': format_amount(self.env, self.amount, self.currency_id),  # للعرض
+            'wp_locale': wp_locale,
         })
         return response_content
     # ==================  /HyperPay: execute payment  ================== #
