@@ -135,9 +135,19 @@ class PaymentTransaction(models.Model):
     # ------------------------------
     @api.model
     def _compute_reference(self, provider_code, prefix=None, separator='-', **kwargs):
+        ref = super()._compute_reference(provider_code, prefix=prefix, separator=separator, **kwargs)
         if provider_code == 'hyperpay':
-            prefix = payment_utils.singularize_reference_prefix()
-        return super()._compute_reference(provider_code, prefix=prefix, separator=separator, **kwargs)
+          # ازل أي محارف غير حرف/رقم
+          safe = re.sub(r'[^A-Za-z0-9]', '', ref or '')
+          # حد أقصى 16 محرف: احتفظ بآخر 16 حتى يشمل الختم الزمني
+          if len(safe) > 16:
+            safe = safe[-16:]
+          # تأكد ما طلعنا بسلسلة فارغة (حالة احتياطية)
+          if not safe:
+            # صيغة قصيرة: tx + YYMMDDHHMMSS = 14 حرف
+            safe = 'tx' + fields.Datetime.now().strftime('%y%m%d%H%M%S')
+          return safe
+        return ref
 
     def _get_specific_rendering_values(self, processing_values):
         res = super()._get_specific_rendering_values(processing_values)
