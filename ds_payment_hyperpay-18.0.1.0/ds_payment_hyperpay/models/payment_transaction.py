@@ -23,12 +23,14 @@ _logger = logging.getLogger(__name__)
 class PaymentTransaction(models.Model):
     _inherit = 'payment.transaction'
 
+    # Reference format per provider
     @api.model
     def _compute_reference(self, provider_code, prefix=None, separator='-', **kwargs):
         if provider_code == 'hyperpay':
             prefix = payment_utils.singularize_reference_prefix()
         return super()._compute_reference(provider_code, prefix=prefix, separator=separator, **kwargs)
 
+    # Entry-point from payment flow
     def _get_specific_rendering_values(self, processing_values):
         res = super()._get_specific_rendering_values(processing_values)
         if self.provider_code != 'hyperpay':
@@ -37,33 +39,68 @@ class PaymentTransaction(models.Model):
             raise odoo.exceptions.UserError("This currency is not supported with selected payment method.")
         return self.hyperpay_execute_payment()
 
+    # =====================  HyperPay: execute payment  ===================== #
     def hyperpay_execute_payment(self):
-        hyperpay_provider = self.provider_id
-        payment_method_code = self.payment_method_id.code
+        """Builds HyperPay request from Odoo partner fields (standard or Studio)."""
+        provider = self.provider_id
+        pm_code = self.payment_method_id.code
 
-        if payment_method_code == 'mada':
-            entity_id = hyperpay_provider.hyperpay_merchant_id_mada
-        else:
-            entity_id = hyperpay_provider.hyperpay_merchant_id
+        # entityId selection
+        entity_id = provider.hyperpay_merchant_id_mada if pm_code == 'mada' else provider.hyperpay_merchant_id
         if not entity_id:
-            raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
+            raise ValidationError("No entityID provided for '%s' transactions." % pm_code)
 
-        # ===== Build customer/billing =====
         partner = self.partner_id  # payer
 
-        # Try to split name into given/surname if you don't store first/last separately
-        def split_name(name):
-            name = (name or "").strip()
-            if not name:
+        # Helpers
+        def _clean(v):
+            return (v or "").strip()
+
+        def _split_name(fullname):
+            fullname = _clean(fullname)
+            if not fullname:
                 return "", ""
-            parts = name.split()
+            parts = fullname.split()
             return (parts[0], " ".join(parts[1:])) if len(parts) > 1 else (parts[0], "")
 
-        # If you have custom firstname/lastname fields, prefer them; else split
-        given, surname = split_name(partner.name)
-        given = getattr(partner, 'firstname', '') or given
-        surname = getattr(partner, 'lastname', '') or surname
+        # Names (prefer Studio fields, else split)
+        given = _clean(getattr(partner, 'x_customer_givenname', '') or getattr(partner, 'firstname', ''))
+        surname = _clean(getattr(partner, 'x_customer_surname', '') or getattr(partner, 'lastname', ''))
+        if not given or not surname:
+            s_given, s_surname = _split_name(partner.name or '')
+            given = given or s_given
+            surname = surname or s_surname
 
+        # Address (prefer Studio billing fields, else standard)
+        street1 = _clean(getattr(partner, 'x_billing_street1', '') or partner.street)
+        city = _clean(getattr(partner, 'x_billing_city', '') or partner.city)
+        postcode = _clean(getattr(partner, 'x_billing_postcode', '') or partner.zip)
+
+        # state: code -> name fallback
+        state_val = getattr(partner, 'x_billing_state', '') or (
+            partner.state_id and (partner.state_id.code or partner.state_id.name)
+        ) or ''
+        state_val = _clean(state_val)
+
+        # country: ISO Alpha-2; default SA
+        country_code = (partner.country_id and (partner.country_id.code or '')) or ''
+        country_code = (country_code or 'SA').upper()[:2]
+
+        # Minimal validation
+        missing = []
+        if not _clean(partner.email): missing.append("Email")
+        if not given:                 missing.append("Given Name")
+        if not surname:               missing.append("Surname")
+        if not street1:               missing.append("Street")
+        if not city:                  missing.append("City")
+        if not postcode:              missing.append("Postcode")
+        if not country_code:          missing.append("Country (alpha-2)")
+        if missing:
+            raise odoo.exceptions.UserError(
+                "Please complete customer fields before payment: " + ", ".join(missing)
+            )
+
+        # Build request (HyperPay format)
         request_values = {
             'entityId': '%s' % entity_id,
             'amount': "{:.2f}".format(self.amount),
@@ -71,73 +108,43 @@ class PaymentTransaction(models.Model):
             'paymentType': 'DB',
             'merchantTransactionId': self.reference,
 
-            # >>> HyperPay-required customer/billing fields <<<
-            'customer.email': partner.email or '',
+            'customer.email': _clean(partner.email),
             'customer.givenName': given,
             'customer.surname': surname,
-            'billing.street1': partner.street or '',
-            'billing.city': partner.city or '',
-            # Use state code if present, else state name
-            'billing.state': (partner.state_id and (partner.state_id.code or partner.state_id.name)) or '',
-            # ISO Alpha-2 code (e.g., SA, AE, PK)
-            'billing.country': 'SA',# (partner.country_id and partner.country_id.code) or '',
-            'billing.postcode': partner.zip or '',
+
+            'billing.street1': street1,
+            'billing.city': city,
+            'billing.state': state_val,
+            'billing.country': country_code,  # SA for KSA by default
+            'billing.postcode': postcode,
         }
 
-        # >>> Test-only flags <<<
-        # Your code already switches the widget URL on provider.state.
-        # Use the same check to add HyperPay test parameters.
-        if hyperpay_provider.state != 'enabled':  # i.e., 'test'
+        # Test-only flags
+        if provider.state != 'enabled':  # test mode
             request_values['testMode'] = 'EXTERNAL'
             request_values['customParameters[3DS2_enrolled]'] = 'true'
 
-        response_content = self.provider_id._hyperpay_make_request(request_values)
+        # Send request
+        response_content = provider._hyperpay_make_request(request_values)
 
-        response_content['action_url'] = '/payment/hyperpay'
-        response_content['checkout_id'] = response_content.get('id')
-        response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
-        response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
-        response_content['paymentMethodCode'] = payment_method_code
-        if hyperpay_provider.state == 'enabled':
-            payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content[
-                'checkout_id']
-        else:
-            payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content[
-                'checkout_id']
-        response_content['payment_url'] = payment_url
+        # Prepare rendering values
+        checkout_id = response_content.get('id')
+        response_content.update({
+            'action_url': '/payment/hyperpay',
+            'checkout_id': checkout_id,
+            'merchantTransactionId': response_content.get('merchantTransactionId'),
+            'formatted_amount': format_amount(self.env, self.amount, self.currency_id),
+            'paymentMethodCode': pm_code,
+            'payment_url': (
+                "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s"
+                if provider.state == 'enabled'
+                else "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s"
+            ) % checkout_id
+        })
         return response_content
-    # def hyperpay_execute_payment(self):
-    #     hyperpay_provider = self.provider_id
-    #     payment_method_code = self.payment_method_id.code
-    #
-    #     if payment_method_code == 'mada':
-    #         entity_id = hyperpay_provider.hyperpay_merchant_id_mada
-    #     else:
-    #         entity_id = hyperpay_provider.hyperpay_merchant_id
-    #     if not entity_id:
-    #         raise ValidationError("No entityID provided for '%s' transactions." % payment_method_code)
-    #
-    #     request_values = {
-    #         'entityId': '%s' % entity_id,
-    #         'amount': "{:.2f}".format(self.amount),
-    #         'currency': self.currency_id.name,
-    #         'paymentType': 'DB',
-    #         'merchantTransactionId': self.reference,
-    #     }
-    #     response_content = self.provider_id._hyperpay_make_request(request_values)
-    #
-    #     response_content['action_url'] = '/payment/hyperpay'
-    #     response_content['checkout_id'] = response_content.get('id')
-    #     response_content['merchantTransactionId'] = response_content.get('merchantTransactionId')
-    #     response_content['formatted_amount'] = format_amount(self.env, self.amount, self.currency_id)
-    #     response_content['paymentMethodCode'] = payment_method_code
-    #     if hyperpay_provider.state == 'enabled':
-    #         payment_url = "https://eu-prod.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
-    #     else:
-    #         payment_url = "https://eu-test.oppwa.com/v1/paymentWidgets.js?checkoutId=%s" % response_content['checkout_id']
-    #     response_content['payment_url'] = payment_url
-    #     return response_content
+    # ==================  /HyperPay: execute payment  ================== #
 
+    # Notification entry-point
     def _get_tx_from_notification_data(self, provider_code, data):
         tx = super()._get_tx_from_notification_data(provider_code, data)
         if provider_code not in ('hyperpay', 'mada'):
@@ -154,6 +161,7 @@ class PaymentTransaction(models.Model):
         tx._handle_hyperpay_payment_status(notification_data)
         return tx
 
+    # Map status -> Odoo transaction state
     def _handle_hyperpay_payment_status(self, notification_data):
         tx_status_set = False
         status = notification_data.get('result', False)
@@ -198,7 +206,8 @@ class PaymentTransaction(models.Model):
                         break
 
             if not tx_status_set:
-                _logger.warning("Received unrecognized payment state %s for "
-                                "transaction with reference %s\nDetailed Message:%s", status_code, self.reference,
-                                status.get('description'))
+                _logger.warning(
+                    "Received unrecognized payment state %s for transaction with reference %s\nDetailed Message:%s",
+                    status_code, self.reference, status.get('description')
+                )
                 self._set_error("HyperPay: " + _("Invalid payment status."))
